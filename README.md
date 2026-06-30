@@ -40,6 +40,8 @@ model.partial_fit(X_new, y_new)
 predictions = model.predict(X_test)
 coefficients = model.coef_
 intercept = model.intercept_
+standard_errors = model.standard_errors_
+covariance = model.coefficient_covariance_
 ```
 
 Rolling-window regression:
@@ -66,10 +68,17 @@ model.partial_fit(X_batch, y_batch)
 ## Design Notes
 
 - `params_` is `[intercept, *coef_]` when `fit_intercept=True`.
+- `coefficient_covariance_` is the classical homoskedastic OLS covariance for
+  `params_`, and `standard_errors_` is aligned with `params_`. Both require
+  `ridge=0`, full-rank sufficient statistics, and positive residual degrees of
+  freedom.
 - Ridge does not penalize the intercept by default, matching common ML-library
   behavior. Set `regularize_intercept=True` to include it.
 - Missing, NaN, infinite, negative-weight, shape-mismatch, and singular
   unregularized systems fail loudly.
+- Weighted covariance treats `sample_weight` as effective observation mass.
+  Heteroskedasticity-robust standard errors are intentionally not exposed
+  because the estimators do not retain row-level residuals or leverage values.
 - `IncrementalOLS.n_observations_` and `ForgettingOLS.n_observations_` count
   raw rows processed. `RollingOLS.n_observations_` counts active-window rows.
   `weight_sum_` is the current effective weighted sample mass, so it decays in

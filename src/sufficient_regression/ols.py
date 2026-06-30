@@ -352,6 +352,82 @@ class _SufficientOLSBase:
         self._require_stats()
         return int(np.linalg.matrix_rank(self._xtx))
 
+    def _require_classical_ols_inference(self) -> int:
+        self._require_stats()
+        if self.ridge != 0:
+            raise RegressionError(
+                "Classical OLS coefficient covariance is only defined when ridge=0."
+            )
+        if self.weight_sum_ <= 0:
+            raise SingularRegressionError(
+                "Cannot estimate coefficient covariance with zero total sample weight."
+            )
+        rank = self.rank_
+        if rank != self.n_params_:
+            raise SingularRegressionError(
+                "Cannot estimate coefficient covariance for a rank-deficient "
+                "regression system."
+            )
+        return rank
+
+    @property
+    def residual_degrees_of_freedom_(self) -> float:
+        """Residual degrees of freedom used by classical OLS inference."""
+
+        rank = self._require_classical_ols_inference()
+        # sample_weight is treated as effective observation mass throughout the
+        # estimator, so the uncertainty calculation uses the same mass rather
+        # than the raw row count.
+        degrees_of_freedom = float(self.weight_sum_ - rank)
+        if degrees_of_freedom <= 0:
+            raise SingularRegressionError(
+                "Cannot estimate residual variance with nonpositive residual "
+                "degrees of freedom."
+            )
+        return degrees_of_freedom
+
+    @property
+    def residual_variance_(self) -> float:
+        """Unbiased classical OLS estimate of sigma squared."""
+
+        degrees_of_freedom = self.residual_degrees_of_freedom_
+        return self.residual_sum_squares_ / degrees_of_freedom
+
+    @property
+    def coefficient_covariance_(self) -> np.ndarray:
+        """Classical covariance matrix for ``params_``.
+
+        The returned matrix is aligned with ``params_``: the intercept is first
+        when ``fit_intercept=True``. This is the homoskedastic OLS covariance
+        ``sigma^2 * (X.T @ X)^-1`` computed from the maintained sufficient
+        statistics.
+        """
+
+        sigma_squared = self.residual_variance_
+        try:
+            inverse_xtx = np.linalg.solve(
+                self._xtx,
+                np.eye(self.n_params_, dtype=float),
+            )
+        except np.linalg.LinAlgError as exc:
+            raise SingularRegressionError(
+                "Cannot estimate coefficient covariance for a singular "
+                "regression system."
+            ) from exc
+        covariance = sigma_squared * inverse_xtx
+        return np.array(covariance, dtype=float, copy=True)
+
+    @property
+    def standard_errors_(self) -> np.ndarray:
+        """Classical standard errors aligned with ``params_``."""
+
+        variances = np.diag(self.coefficient_covariance_)
+        if np.any(variances < 0):
+            raise SingularRegressionError(
+                "Coefficient covariance has negative diagonal variances."
+            )
+        return np.sqrt(variances)
+
     @property
     def diagnostics_(self) -> RegressionDiagnostics:
         self._require_stats()

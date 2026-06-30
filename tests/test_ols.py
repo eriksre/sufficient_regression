@@ -10,6 +10,7 @@ from sufficient_regression import (
     IncrementalOLS,
     NotFittedError,
     RollingOLS,
+    RegressionError,
     SingularRegressionError,
 )
 
@@ -364,6 +365,121 @@ def test_constant_target_diagnostics_have_nan_r_squared():
     diag = model.diagnostics_
     assert diag.total_sum_squares == 0.0
     assert math.isnan(diag.r_squared)
+
+
+@pytest.mark.parametrize("fit_intercept", [True, False])
+def test_classical_ols_uncertainty_matches_statsmodels(fit_intercept):
+    X, y, _, _ = make_data(n=140, p=4, seed=411, noise=0.35)
+    model = IncrementalOLS(fit_intercept=fit_intercept).fit(X, y)
+
+    if fit_intercept:
+        X_design = sm.add_constant(X, has_constant="add")
+    else:
+        X_design = X
+    expected = sm.OLS(y, X_design).fit()
+
+    assert model.residual_degrees_of_freedom_ == pytest.approx(expected.df_resid)
+    assert model.residual_variance_ == pytest.approx(expected.scale, abs=1e-12)
+    np.testing.assert_allclose(
+        model.coefficient_covariance_,
+        expected.cov_params(),
+        atol=1e-12,
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        model.standard_errors_,
+        expected.bse,
+        atol=1e-12,
+        rtol=1e-12,
+    )
+
+    covariance_copy = model.coefficient_covariance_
+    covariance_copy[0, 0] = -1.0
+    assert model.coefficient_covariance_[0, 0] != -1.0
+
+
+def test_weighted_uncertainty_treats_weights_as_effective_observation_mass():
+    X, y, _, _ = make_data(n=28, p=3, seed=412, noise=0.4)
+    weights = np.tile(np.array([1.0, 2.0, 3.0, 4.0]), 7)
+    model = IncrementalOLS().fit(X, y, sample_weight=weights)
+
+    repeated_X = np.repeat(X, weights.astype(int), axis=0)
+    repeated_y = np.repeat(y, weights.astype(int))
+    expected = IncrementalOLS().fit(repeated_X, repeated_y)
+
+    assert model.residual_degrees_of_freedom_ == pytest.approx(
+        expected.residual_degrees_of_freedom_
+    )
+    assert model.residual_variance_ == pytest.approx(
+        expected.residual_variance_, abs=1e-12
+    )
+    np.testing.assert_allclose(
+        model.coefficient_covariance_,
+        expected.coefficient_covariance_,
+        atol=1e-12,
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        model.standard_errors_,
+        expected.standard_errors_,
+        atol=1e-12,
+        rtol=1e-12,
+    )
+
+
+def test_rolling_and_forgetting_uncertainty_use_current_sufficient_statistics():
+    X, y, _, _ = make_data(n=80, p=3, seed=413, noise=0.3)
+    window = 22
+
+    rolling = RollingOLS(window=window).fit(X, y)
+    rolling_expected = IncrementalOLS().fit(X[-window:], y[-window:])
+    np.testing.assert_allclose(
+        rolling.coefficient_covariance_,
+        rolling_expected.coefficient_covariance_,
+        atol=1e-12,
+        rtol=1e-12,
+    )
+
+    forgetting = ForgettingOLS(decay=1.0).fit(X[:35], y[:35])
+    forgetting.partial_fit(X[35:], y[35:])
+    incremental = IncrementalOLS().fit(X, y)
+    np.testing.assert_allclose(
+        forgetting.standard_errors_,
+        incremental.standard_errors_,
+        atol=1e-12,
+        rtol=1e-12,
+    )
+
+
+def test_uncertainty_raises_when_classical_covariance_is_not_defined():
+    with pytest.raises(NotFittedError):
+        _ = IncrementalOLS().coefficient_covariance_
+
+    X, y, _, _ = make_data(n=30, p=3, seed=414)
+    ridge = IncrementalOLS(ridge=0.1).fit(X, y)
+    with pytest.raises(RegressionError, match="ridge=0"):
+        _ = ridge.coefficient_covariance_
+
+    rank_deficient_X = np.array(
+        [[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0]]
+    )
+    rank_deficient = IncrementalOLS(fit_intercept=False).fit(
+        rank_deficient_X,
+        np.array([1.0, 2.0, 3.0, 4.0]),
+    )
+    with pytest.raises(SingularRegressionError, match="rank-deficient"):
+        _ = rank_deficient.standard_errors_
+
+    exact_fit = IncrementalOLS(fit_intercept=False).fit(
+        np.eye(3),
+        np.array([1.0, 2.0, 3.0]),
+    )
+    with pytest.raises(SingularRegressionError, match="nonpositive"):
+        _ = exact_fit.residual_variance_
+
+    zero_weight = IncrementalOLS().fit(X, y, sample_weight=np.zeros(len(y)))
+    with pytest.raises(SingularRegressionError, match="zero total sample weight"):
+        _ = zero_weight.coefficient_covariance_
 
 
 @pytest.mark.parametrize("fit_intercept", [True, False])
