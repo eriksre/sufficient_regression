@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sufficient-regression"
+version = "0.1.0"
+description = "A Python package for sufficient regression."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Eriks Reinfelds" }
+]
+dependencies = [
+  "numpy>=1.24"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest-cov>=7",
+  "pytest>=8",
+  "scikit-learn>=1.4",
+  "statsmodels>=0.14"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["sufficient_regression"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true

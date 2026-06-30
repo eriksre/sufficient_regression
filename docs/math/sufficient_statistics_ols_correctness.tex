@@ -43,6 +43,11 @@ share.  The design matrix is
 \]
 Each row vector \(x_i \in \mathbb{R}^p\) must already contain any
 intercept column.  The formulas do not add an intercept implicitly.
+In the package API, this \(X\) is the internal design matrix after
+preprocessing: when \texttt{fit\_intercept=True}, the implementation
+prepends a column of ones to the raw feature matrix before forming the
+statistics.  When \texttt{fit\_intercept=False}, the raw feature matrix
+is used as \(X\) directly.
 
 The sufficient statistics are
 \[

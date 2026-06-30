@@ -205,9 +205,10 @@ costs for common OLS variants:
 Variant & Additional work & Update cost \\
 \hline
 Weighted OLS & Multiply the row contribution by \(w_i\). & \(\Theta(p^2)\) \\
-Ridge & Add a fixed penalty matrix before solving.  Diagonal ridge is
-only \(\Theta(p)\); dense \(R\) is \(\Theta(p^2)\). & Solve remains
-\(\Theta(p^3)\) \\
+Ridge & Add a fixed penalty matrix before solving.  The dense
+implementation materializes and adds a \(p \times p\) matrix, so this
+pre-solve step is \(\Theta(p^2)\) even for diagonal ridge. & Solve
+remains \(\Theta(p^3)\) \\
 Forgetting & Scale \(G\) by \(\alpha\), scale \(h\) and \(q\), then add
 the new row. & \(\Theta(p^2)\) \\
 \hline
