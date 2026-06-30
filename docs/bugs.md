@@ -7,6 +7,9 @@ No open bugs are currently known.
 - Fixed: fresh workspaces lacked the gitignored `.venv` expected by the
   documented development workflow. Tracked setup and test scripts now create
   and activate `.venv` before Python commands.
+- Fixed: `scripts/test.sh` trusted any readable `.venv` as ready for tests, so
+  an existing but unbootstrapped environment failed with `No module named
+  pytest`. It now installs dev dependencies when pytest is absent.
 - Fixed: OLS models exposed coefficients and sufficient statistics but did not
   expose classical coefficient covariance or standard errors. The estimators
   now provide loud classical-OLS-only inference properties.

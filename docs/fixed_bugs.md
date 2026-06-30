@@ -2,6 +2,8 @@
 
 ## 2026-07-01
 
+- Made `scripts/test.sh` bootstrap dev dependencies when an existing `.venv`
+  lacks pytest.
 - Added tracked setup and test scripts that create `.venv` when absent,
   activate it before Python commands, and install development dependencies.
 - Added classical OLS coefficient covariance, standard errors, residual
