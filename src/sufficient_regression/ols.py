@@ -183,6 +183,68 @@ def _regularization_matrix(
     return np.diag(ridge * diagonal)
 
 
+def _rank_one_cholesky_update(lower: np.ndarray, update: np.ndarray) -> np.ndarray:
+    """Return the Cholesky factor for ``lower @ lower.T + update update.T``."""
+
+    updated = np.array(lower, dtype=float, copy=True)
+    vector = np.array(update, dtype=float, copy=True)
+    if updated.ndim != 2 or updated.shape[0] != updated.shape[1]:
+        raise ValueError("lower must be a square matrix.")
+    if vector.ndim != 1 or vector.shape[0] != updated.shape[0]:
+        raise ValueError("update must be a vector matching lower.")
+
+    for index in range(vector.shape[0]):
+        diagonal = updated[index, index]
+        if not np.isfinite(diagonal) or diagonal <= 0.0:
+            raise SingularRegressionError(
+                "Cannot rank-one update a non-positive Cholesky factor."
+            )
+        radius = np.hypot(diagonal, vector[index])
+        cosine = radius / diagonal
+        sine = vector[index] / diagonal
+        updated[index, index] = radius
+        if index + 1 < vector.shape[0]:
+            updated[index + 1 :, index] = (
+                updated[index + 1 :, index] + sine * vector[index + 1 :]
+            ) / cosine
+            vector[index + 1 :] = (
+                cosine * vector[index + 1 :]
+                - sine * updated[index + 1 :, index]
+            )
+    return updated
+
+
+def _solve_lower_triangular(lower: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    solution = np.empty_like(rhs, dtype=float)
+    for row in range(lower.shape[0]):
+        diagonal = lower[row, row]
+        if not np.isfinite(diagonal) or diagonal == 0.0:
+            raise SingularRegressionError("Cannot solve with a singular factor.")
+        solution[row] = (
+            rhs[row] - float(lower[row, :row] @ solution[:row])
+        ) / diagonal
+    return solution
+
+
+def _solve_upper_from_lower_transpose(
+    lower: np.ndarray, rhs: np.ndarray
+) -> np.ndarray:
+    solution = np.empty_like(rhs, dtype=float)
+    for row in range(lower.shape[0] - 1, -1, -1):
+        diagonal = lower[row, row]
+        if not np.isfinite(diagonal) or diagonal == 0.0:
+            raise SingularRegressionError("Cannot solve with a singular factor.")
+        solution[row] = (
+            rhs[row] - float(lower[row + 1 :, row] @ solution[row + 1 :])
+        ) / diagonal
+    return solution
+
+
+def _solve_cholesky_factor(lower: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    intermediate = _solve_lower_triangular(lower, rhs)
+    return _solve_upper_from_lower_transpose(lower, intermediate)
+
+
 class _SufficientOLSBase:
     """Shared solving and validation code for sufficient-stat estimators."""
 
@@ -291,16 +353,20 @@ class _SufficientOLSBase:
         self.n_observations_ -= int(n_rows)
         self._dirty = True
 
-    def _solve_params(self) -> np.ndarray:
+    def _regularized_system(self) -> np.ndarray:
         self._require_stats()
-        if self.weight_sum_ <= 0:
-            raise SingularRegressionError("Cannot solve with zero total sample weight.")
-        system = self._xtx + _regularization_matrix(
+        return self._xtx + _regularization_matrix(
             self.n_params_,
             ridge=self.ridge,
             fit_intercept=self.fit_intercept,
             regularize_intercept=self.regularize_intercept,
         )
+
+    def _solve_params(self) -> np.ndarray:
+        self._require_stats()
+        if self.weight_sum_ <= 0:
+            raise SingularRegressionError("Cannot solve with zero total sample weight.")
+        system = self._regularized_system()
         try:
             return np.linalg.solve(system, self._xty)
         except np.linalg.LinAlgError as exc:
@@ -508,6 +574,83 @@ class IncrementalOLS(_SufficientOLSBase):
             _as_single_value(y, name="y"),
             sample_weight=_as_single_weight(sample_weight),
         )
+
+
+class CholeskyIncrementalOLS(IncrementalOLS):
+    """Append-only OLS with an incrementally maintained Cholesky factor.
+
+    This prototype keeps the same exact sufficient statistics as
+    :class:`IncrementalOLS`. After the first successful coefficient solve, it
+    updates the Cholesky factor of the regularized normal-equation system with
+    one rank-one update per appended row, reducing the post-factorization
+    coefficient path from a dense solve to triangular solves.
+    """
+
+    def _reset_state(self) -> None:
+        super()._reset_state()
+        self._cholesky_factor: np.ndarray | None = None
+
+    @property
+    def cholesky_factor_(self) -> np.ndarray:
+        """Lower Cholesky factor of the current regularized solve system."""
+
+        return self._ensure_cholesky_factor().copy()
+
+    def partial_fit(
+        self,
+        X: ArrayLike,
+        y: ArrayLike,
+        *,
+        sample_weight: ArrayLike | None = None,
+    ) -> "CholeskyIncrementalOLS":
+        if self.n_features_in_ is None:
+            return self.fit(X, y, sample_weight=sample_weight)
+        _, X_aug, y_arr, weights = self._validate_X_y(
+            X, y, sample_weight, reset=False
+        )
+        updated_factor = self._updated_factor_for_batch(X_aug, weights)
+        self._add_stats(*_weighted_stats(X_aug, y_arr, weights), n_rows=y_arr.shape[0])
+        if updated_factor is not None:
+            self._cholesky_factor = updated_factor
+        return self
+
+    append = partial_fit
+
+    def _ensure_cholesky_factor(self) -> np.ndarray:
+        self._require_stats()
+        if self._cholesky_factor is None:
+            try:
+                self._cholesky_factor = np.linalg.cholesky(
+                    self._regularized_system()
+                )
+            except np.linalg.LinAlgError as exc:
+                raise SingularRegressionError(
+                    "The regression system is singular or not positive definite. "
+                    "Add more independent rows, remove collinear features, or "
+                    "use ridge > 0."
+                ) from exc
+        return self._cholesky_factor
+
+    def _updated_factor_for_batch(
+        self, X_aug: np.ndarray, weights: np.ndarray
+    ) -> np.ndarray | None:
+        if self._cholesky_factor is None:
+            return None
+        factor = np.array(self._cholesky_factor, dtype=float, copy=True)
+        for z, weight in zip(X_aug, weights, strict=True):
+            if weight == 0.0:
+                continue
+            # The ridge penalty is fixed after initialization, so each
+            # appended weighted row changes the solve system by exactly uu^T.
+            update = np.sqrt(weight) * z
+            factor = _rank_one_cholesky_update(factor, update)
+        return factor
+
+    def _solve_params(self) -> np.ndarray:
+        self._require_stats()
+        if self.weight_sum_ <= 0:
+            raise SingularRegressionError("Cannot solve with zero total sample weight.")
+        return _solve_cholesky_factor(self._ensure_cholesky_factor(), self._xty)
 
 
 class RollingOLS(_SufficientOLSBase):

@@ -1,6 +1,7 @@
 """Exact online and rolling least-squares regression."""
 
 from .ols import (
+    CholeskyIncrementalOLS,
     ForgettingOLS,
     IncrementalOLS,
     NotFittedError,
@@ -11,6 +12,7 @@ from .ols import (
 )
 
 __all__ = [
+    "CholeskyIncrementalOLS",
     "ForgettingOLS",
     "IncrementalOLS",
     "NotFittedError",

@@ -37,8 +37,8 @@ therefore costs
   C_{stats}(r,p)=\Theta(rp^2).
 \]
 Computing coefficients after the statistics are available costs
-\(\Theta(p^3)\) with a standard dense solver.  Thus a complete batch OLS
-fit from raw rows costs
+\(\Theta(p^3)\) with the default standard dense solver.  Thus a complete
+batch OLS fit from raw rows costs
 \[
   C_{fit}(r,p)=\Theta(rp^2+p^3).
 \]
@@ -212,7 +212,7 @@ the new row. & \(\Theta(p^2)\) \\
 \end{array}
 \]
 
-The current dense implementation materializes and adds a \(p \times p\)
+The default dense solver path materializes and adds a \(p \times p\)
 penalty matrix, so the ridge pre-solve setup is \(\Theta(p^2)\) even
 when the penalty is diagonal.  This term is lower order than the dense
 \(\Theta(p^3)\) solve, but it is still the implementation's actual
@@ -227,6 +227,47 @@ statistics:
   q_t=\alpha q_{t-1}+y_t^2 .
 \]
 Scaling \(G\) is \(\Theta(p^2)\), matching the row outer-product order.
+
+\section{Rank-one Cholesky factor prototype}
+
+The append-only rank-one prototype targets the solve term directly.  Let
+\[
+  A = G + R,
+\]
+where \(R\) is the fixed ridge penalty matrix for the estimator.  Once
+the implementation has a Cholesky factor
+\[
+  A = LL^T,
+\]
+an appended weighted row \((x,y,w)\) changes the solve system by
+\[
+  A^+ = A + uu^T,\qquad u=\sqrt{w}\,x .
+\]
+A Cholesky rank-one update computes \(L^+\) satisfying
+\[
+  A^+ = L^+(L^+)^T
+\]
+in \(\Theta(p^2)\) time.  The right-hand side still updates as
+\[
+  h^+ = h + wxy,
+\]
+which costs \(\Theta(p)\) once the row is available.  Solving
+\[
+  Lz=h,\qquad L^T\beta=z
+\]
+by triangular substitution costs \(\Theta(p^2)\).
+
+Therefore, after the first successful factorization, an append followed
+by coefficients costs
+\[
+  \Theta(p^2)
+\]
+for factor maintenance and triangular solves instead of the default
+\(\Theta(p^3)\) dense solve.  This prototype deliberately covers only
+append updates.  Rolling-window downdates would require subtracting
+\(uu^T\), which can destroy positive definiteness; supporting that path
+requires an explicit downdate rejection policy rather than a quiet
+fallback to a dense solve.
 
 \section{Memory complexity}
 
@@ -263,8 +304,9 @@ replacing each full-window rebuild with one subtract and one add.
 The headline asymptotic speedups are exact for statistic maintenance:
 1001 for a final million-plus-1000 append rebuild, \(\Theta(n)\) for
 solve-after-each append streams, and \(\Theta(1000)\) for a rolling
-window of size 1000.  End-to-end wall-clock speedups are bounded by the
-unchanged dense solve cost unless the implementation also updates or
-reuses a factorization.
+window of size 1000.  End-to-end wall-clock speedups in the default
+estimators are bounded by the unchanged dense solve cost.  The
+append-only Cholesky prototype removes that dense solve from the hot
+path after the first successful factorization.
 
 \end{document}

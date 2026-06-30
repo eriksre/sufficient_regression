@@ -19,6 +19,7 @@ rows is exact up to floating point roundoff.
 ## Estimators
 
 - `IncrementalOLS`: append-only exact OLS / ridge updates.
+- `CholeskyIncrementalOLS`: append-only rank-one Cholesky update prototype.
 - `RollingOLS`: fixed-window exact add/drop updates with an internal ring
   buffer.
 - `ForgettingOLS`: exponentially weighted OLS for evolving processes.
@@ -42,6 +43,18 @@ coefficients = model.coef_
 intercept = model.intercept_
 standard_errors = model.standard_errors_
 covariance = model.coefficient_covariance_
+```
+
+Append-only regression with incremental factor maintenance:
+
+```python
+from sufficient_regression import CholeskyIncrementalOLS
+
+model = CholeskyIncrementalOLS(ridge=1e-6)
+model.fit(X_initial, y_initial)
+beta = model.params_  # Builds the initial Cholesky factor.
+model.partial_fit(X_new, y_new)
+updated_beta = model.params_  # Uses rank-one factor updates plus triangular solves.
 ```
 
 Rolling-window regression:
@@ -86,6 +99,10 @@ model.partial_fit(X_batch, y_batch)
 - `RollingOLS.fit` on more rows than the window retains only the final window.
 - `RollingOLS` recomputes sufficient statistics from its active ring buffer
   once per full window by default, bounding add/drop roundoff in long streams.
+- `CholeskyIncrementalOLS` is opt-in because it requires the regularized normal
+  system to be positive definite when coefficients are first requested. After
+  that factor exists, append updates use rank-one Cholesky updates instead of a
+  fresh dense factorization.
 - The implementation intentionally does not use a pseudoinverse fallback.
   Singular systems raise `SingularRegressionError`; use ridge when you want a
   regularized solution.

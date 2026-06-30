@@ -6,6 +6,7 @@ import statsmodels.api as sm
 from sklearn.linear_model import LinearRegression, Ridge
 
 from sufficient_regression import (
+    CholeskyIncrementalOLS,
     ForgettingOLS,
     IncrementalOLS,
     NotFittedError,
@@ -90,6 +91,7 @@ def test_public_api_exports():
     import sufficient_regression
 
     assert sufficient_regression.__all__ == [
+        "CholeskyIncrementalOLS",
         "ForgettingOLS",
         "IncrementalOLS",
         "NotFittedError",
@@ -137,6 +139,71 @@ def test_incremental_chunked_and_row_push_match_batch():
     np.testing.assert_allclose(
         rowwise.predict(X[:10]), augment(X[:10], True) @ expected
     )
+
+
+@pytest.mark.parametrize("fit_intercept", [True, False])
+def test_cholesky_incremental_matches_reference_and_factor(fit_intercept):
+    X, y, _, _ = make_data(n=120, p=4, seed=432)
+    weights = np.linspace(0.2, 2.0, len(y))
+    ridge = 0.3
+    model = CholeskyIncrementalOLS(fit_intercept=fit_intercept, ridge=ridge).fit(
+        X[:35],
+        y[:35],
+        sample_weight=weights[:35],
+    )
+    _ = model.params_
+
+    model.partial_fit(X[35:80], y[35:80], sample_weight=weights[35:80])
+    model.partial_fit(X[80:], y[80:], sample_weight=weights[80:])
+
+    expected = reference_params(
+        X,
+        y,
+        fit_intercept=fit_intercept,
+        sample_weight=weights,
+        ridge=ridge,
+    )
+    assert_params_equal(model, expected, atol=1e-10, rtol=1e-10)
+
+    factor = model.cholesky_factor_
+    system = model.xtx_ + ridge_penalty(
+        factor.shape[0],
+        ridge,
+        fit_intercept,
+    )
+    np.testing.assert_allclose(factor @ factor.T, system, atol=1e-10, rtol=1e-10)
+
+
+def test_cholesky_incremental_uses_rank_one_update_after_factorization(monkeypatch):
+    X, y, _, _ = make_data(n=60, p=3, seed=433)
+    ridge = 0.2
+    model = CholeskyIncrementalOLS(ridge=ridge).fit(X[:30], y[:30])
+    _ = model.params_
+    expected = reference_params(X[:31], y[:31], ridge=ridge)
+
+    def fail_cholesky(*args, **kwargs):
+        raise AssertionError("unexpected dense Cholesky refactorization")
+
+    def fail_solve(*args, **kwargs):
+        raise AssertionError("unexpected dense normal-equation solve")
+
+    monkeypatch.setattr(np.linalg, "cholesky", fail_cholesky)
+    monkeypatch.setattr(np.linalg, "solve", fail_solve)
+
+    model.push(X[30], y[30])
+    assert_params_equal(model, expected, atol=1e-10, rtol=1e-10)
+
+
+def test_cholesky_incremental_accumulates_until_system_is_full_rank():
+    X, y, _, _ = make_data(n=12, p=3, seed=434)
+    model = CholeskyIncrementalOLS()
+
+    model.push(X[0], y[0])
+    with pytest.raises(SingularRegressionError, match="singular"):
+        _ = model.params_
+
+    model.partial_fit(X[1:5], y[1:5])
+    assert_params_equal(model, reference_params(X[:5], y[:5]))
 
 
 def test_incremental_weighted_matches_statsmodels_wls():
