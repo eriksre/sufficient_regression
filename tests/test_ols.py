@@ -254,6 +254,9 @@ def test_validation_edge_cases_are_explicit():
     )
     assert column_y.n_observations_ == 5
 
+    scalar_y = IncrementalOLS(ridge=0.1).fit([[1.0, 2.0]], 3.0)
+    assert scalar_y.n_observations_ == 1
+
     single_row = IncrementalOLS(ridge=0.1).push(
         [[1.0, 2.0]],
         [3.0],
@@ -263,8 +266,13 @@ def test_validation_edge_cases_are_explicit():
 
     with pytest.raises(ValueError, match="1D or 2D"):
         IncrementalOLS().fit(np.ones((2, 2, 1)), np.ones(2))
-    with pytest.raises(ValueError, match="1D array"):
+    with pytest.raises(ValueError, match="single-column"):
         IncrementalOLS().fit(np.ones((2, 2)), np.ones((2, 2)))
+    with pytest.raises(ValueError, match="row-vector"):
+        IncrementalOLS().fit(
+            np.arange(10.0).reshape(5, 2),
+            np.arange(5.0).reshape(1, -1),
+        )
     with pytest.raises(ValueError, match="must have 2 values"):
         IncrementalOLS().fit(np.ones((2, 2)), np.ones(3))
     with pytest.raises(ValueError, match="finite"):

@@ -56,10 +56,20 @@ def _as_2d_float_array(X: ArrayLike, *, name: str) -> np.ndarray:
 
 def _as_1d_float_array(y: ArrayLike, *, name: str, n_rows: int) -> np.ndarray:
     arr = np.asarray(y, dtype=float)
-    if arr.ndim == 2 and 1 in arr.shape:
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+    # A 2D target is only valid as an explicit single column; flattening row
+    # vectors would silently reinterpret columns as observations.
+    elif arr.ndim == 2 and arr.shape[1] == 1:
         arr = arr.reshape(-1)
+    elif arr.ndim == 2 and arr.shape[0] == 1:
+        raise ValueError(
+            f"{name} must not be a row-vector target; use shape (n,) or (n, 1)."
+        )
     if arr.ndim != 1:
-        raise ValueError(f"{name} must be a 1D array.")
+        raise ValueError(
+            f"{name} must be a scalar, 1D array, or single-column 2D array."
+        )
     if arr.shape[0] != n_rows:
         raise ValueError(
             f"{name} must have {n_rows} values to match X; got {arr.shape[0]}."
