@@ -1,0 +1,374 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{array}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Mathematical Correctness of Sufficient-Statistics OLS}
+\author{sufficient-regression design note}
+\date{June 30, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Scope and assumptions}
+
+This note gives the algebra that an IncrementalOLS, RollingOLS,
+weighted OLS, ridge, and exponentially forgotten OLS implementation can
+share.  The design matrix is
+\[
+  X =
+  \begin{bmatrix}
+    x_1^T \\
+    \vdots \\
+    x_n^T
+  \end{bmatrix}
+  \in \mathbb{R}^{n \times p},
+  \qquad
+  y =
+  \begin{bmatrix}
+    y_1 \\
+    \vdots \\
+    y_n
+  \end{bmatrix}
+  \in \mathbb{R}^n .
+\]
+Each row vector \(x_i \in \mathbb{R}^p\) must already contain any
+intercept column.  The formulas do not add an intercept implicitly.
+
+The sufficient statistics are
+\[
+  G = X^T X = \sum_{i=1}^n x_i x_i^T,\qquad
+  h = X^T y = \sum_{i=1}^n x_i y_i,\qquad
+  q = y^T y = \sum_{i=1}^n y_i^2,\qquad
+  n .
+\]
+The matrix \(G\) is symmetric positive semidefinite.  Ordinary least
+squares has a unique coefficient vector exactly when \(G\) is positive
+definite, equivalently when \(X\) has full column rank.  In formulas
+below, inverses denote mathematical solutions.  An implementation should
+solve linear systems using a numerically appropriate factorization and
+should fail loudly when the stated rank or definiteness conditions are
+not met.
+
+\section{Ordinary least squares from sufficient statistics}
+
+\begin{lemma}[Objective expansion]
+For any coefficient vector \(\beta \in \mathbb{R}^p\),
+\[
+  \|y - X\beta\|_2^2
+  = q - 2\beta^T h + \beta^T G\beta .
+\]
+\end{lemma}
+
+\begin{proof}
+Expand the quadratic:
+\[
+  (y - X\beta)^T(y - X\beta)
+  = y^T y - 2\beta^T X^T y + \beta^T X^T X\beta
+  = q - 2\beta^T h + \beta^T G\beta .
+\]
+\end{proof}
+
+\begin{theorem}[OLS coefficient formula]
+If \(G\) is positive definite, the unique ordinary least squares
+solution is
+\[
+  \widehat{\beta} = G^{-1}h .
+\]
+\end{theorem}
+
+\begin{proof}
+By the objective expansion, the gradient is
+\[
+  \nabla_\beta\left(q - 2\beta^T h + \beta^T G\beta\right)
+  = -2h + 2G\beta .
+\]
+Setting the gradient to zero gives the normal equation
+\[
+  G\widehat{\beta}=h .
+\]
+Positive definiteness makes the objective strictly convex, so this
+stationary point is the unique minimizer.
+\end{proof}
+
+\begin{corollary}[Residual sum of squares]
+For any candidate \(\beta\),
+\[
+  \operatorname{RSS}(\beta)
+  = q - 2\beta^T h + \beta^T G\beta .
+\]
+For the OLS solution,
+\[
+  \operatorname{RSS}(\widehat{\beta})
+  = q - h^T G^{-1}h .
+\]
+\end{corollary}
+
+\begin{proof}
+The first identity is the objective expansion.  For the minimizer,
+\(G\widehat{\beta}=h\), so
+\[
+  \widehat{\beta}^T G\widehat{\beta}
+  = \widehat{\beta}^T h
+  = h^T G^{-1}h .
+\]
+Substitution gives the result.
+\end{proof}
+
+Therefore two data sets with the same \((G,h,q,n)\) have the same OLS
+objective for every \(\beta\), the same OLS coefficients when the
+solution is unique, and the same residual sum of squares.  Raw rows are
+not required for these quantities once the statistics are correct.
+
+\section{IncrementalOLS append formulas}
+
+Let \(S_t=(G_t,h_t,q_t,n_t)\) be the statistics after \(t\) rows.  When a
+new observation \((x,y)\) arrives,
+\[
+  G_{t+1} = G_t + xx^T,\qquad
+  h_{t+1} = h_t + xy,\qquad
+  q_{t+1} = q_t + y^2,\qquad
+  n_{t+1} = n_t + 1 .
+\]
+For a batch \(X_B \in \mathbb{R}^{m \times p}\), \(y_B \in
+\mathbb{R}^m\),
+\[
+  G_{new} = G_{old} + X_B^T X_B,\qquad
+  h_{new} = h_{old} + X_B^T y_B,\qquad
+  q_{new} = q_{old} + y_B^T y_B,\qquad
+  n_{new} = n_{old} + m .
+\]
+
+\begin{theorem}[Correctness of append]
+The append formulas produce exactly the same sufficient statistics as
+recomputing \(X^T X\), \(X^T y\), and \(y^T y\) from all rows after the
+append.
+\end{theorem}
+
+\begin{proof}
+The statistic \(G\) is a sum of row outer products.  Appending
+\((x,y)\) changes that sum by exactly \(xx^T\):
+\[
+  \sum_{i=1}^{t+1} x_i x_i^T
+  =
+  \sum_{i=1}^{t} x_i x_i^T + x_{t+1}x_{t+1}^T .
+\]
+The same additive argument applies to \(h=\sum_i x_i y_i\),
+\(q=\sum_i y_i^2\), and \(n\).  The batch case follows by applying the
+single-row argument to each row in the batch, or directly from block
+matrix multiplication.
+\end{proof}
+
+\section{RollingOLS add/drop formulas}
+
+For a rolling window, the active data set is a finite multiset of rows.
+Suppose the current window statistics include an old observation
+\((x_{old}, y_{old})\).  Dropping it gives
+\[
+  G^- = G - x_{old}x_{old}^T,\qquad
+  h^- = h - x_{old}y_{old},\qquad
+  q^- = q - y_{old}^2,\qquad
+  n^- = n - 1 .
+\]
+Adding a new observation \((x_{new}, y_{new})\) after the drop gives
+\[
+  G^+ = G^- + x_{new}x_{new}^T,\qquad
+  h^+ = h^- + x_{new}y_{new},\qquad
+  q^+ = q^- + y_{new}^2,\qquad
+  n^+ = n^- + 1 .
+\]
+For a fixed-size one-step slide these combine to
+\[
+  G^+ = G - x_{old}x_{old}^T + x_{new}x_{new}^T,
+\]
+\[
+  h^+ = h - x_{old}y_{old} + x_{new}y_{new},
+  \qquad
+  q^+ = q - y_{old}^2 + y_{new}^2,
+  \qquad
+  n^+ = n .
+\]
+
+\begin{theorem}[Correctness of add/drop]
+If the dropped observation is in the active window, the add/drop
+formulas produce exactly the sufficient statistics of the new active
+window.
+\end{theorem}
+
+\begin{proof}
+The active-window statistic \(G\) is the sum of \(xx^T\) over exactly
+the rows in the window.  Removing one row subtracts that row's summand,
+and adding one row adds the new summand.  The same summand-by-summand
+argument applies to \(h\), \(q\), and \(n\).
+\end{proof}
+
+Rolling deletion cannot be inferred from \((G,h,q,n)\) alone: the
+implementation must know the departing row, or at least its stored
+contributions \(xx^T\), \(xy\), and \(y^2\).  This is a mathematical
+requirement, not an implementation preference.
+
+\section{Weighted OLS}
+
+Let \(W=\operatorname{diag}(w_1,\ldots,w_n)\), with \(w_i \ge 0\).  The
+weighted least squares objective is
+\[
+  L_w(\beta) = (y-X\beta)^T W (y-X\beta)
+  = \sum_{i=1}^n w_i(y_i-x_i^T\beta)^2 .
+\]
+Define weighted sufficient statistics
+\[
+  G_w = X^T W X = \sum_{i=1}^n w_i x_i x_i^T,\qquad
+  h_w = X^T W y = \sum_{i=1}^n w_i x_i y_i,\qquad
+  q_w = y^T W y = \sum_{i=1}^n w_i y_i^2 .
+\]
+If \(G_w\) is positive definite, then
+\[
+  \widehat{\beta}_w = G_w^{-1}h_w .
+\]
+
+\begin{proof}
+The objective expands as
+\[
+  L_w(\beta) = q_w - 2\beta^T h_w + \beta^T G_w\beta .
+\]
+The gradient is \(-2h_w + 2G_w\beta\).  Positive definiteness gives a
+strictly convex objective, so \(G_w\widehat{\beta}_w=h_w\) has the
+unique minimizer.
+\end{proof}
+
+Equivalently, weighted OLS is unweighted OLS on transformed rows
+\(\sqrt{w_i}x_i\) and transformed responses \(\sqrt{w_i}y_i\).  An
+incremental weighted append with observation weight \(w\) is
+\[
+  G_{new}=G+wxx^T,\qquad
+  h_{new}=h+wxy,\qquad
+  q_{new}=q+wy^2 .
+\]
+Weighted rolling add/drop uses the same signed contributions.  Negative
+weights do not define a least-squares norm and should be rejected.
+
+\section{Ridge regression}
+
+Let \(R\in\mathbb{R}^{p\times p}\) be a symmetric positive semidefinite
+penalty matrix.  Ridge solves
+\[
+  \widehat{\beta}_R
+  =
+  \argmin_\beta
+  \left[
+    \|y-X\beta\|_2^2 + \beta^T R\beta
+  \right] .
+\]
+Using the same sufficient statistics,
+\[
+  \|y-X\beta\|_2^2 + \beta^T R\beta
+  =
+  q - 2\beta^T h + \beta^T(G+R)\beta .
+\]
+If \(G+R\) is positive definite, then
+\[
+  \widehat{\beta}_R = (G+R)^{-1}h .
+\]
+
+\begin{proof}
+The gradient of the penalized objective is
+\[
+  -2h + 2(G+R)\beta .
+\]
+The normal equation is \((G+R)\widehat{\beta}_R=h\).  Positive
+definiteness of \(G+R\) makes the penalized objective strictly convex,
+so the solution is unique.
+\end{proof}
+
+Scalar ridge with all coefficients penalized uses \(R=\lambda I_p\),
+\(\lambda\ge 0\).  If the intercept should not be penalized, the design
+matrix should place the intercept in a known column and use a penalty
+matrix such as
+\[
+  R=\operatorname{diag}(0,\lambda,\ldots,\lambda).
+\]
+This convention must be explicit because it changes the estimator.
+
+\section{Exponential forgetting}
+
+Let \(\alpha \in (0,1]\) be a forgetting factor.  At time \(t\), define
+exponentially weighted statistics
+\[
+  G_t = \sum_{i=1}^t \alpha^{t-i}x_i x_i^T,\qquad
+  h_t = \sum_{i=1}^t \alpha^{t-i}x_i y_i,\qquad
+  q_t = \sum_{i=1}^t \alpha^{t-i}y_i^2 .
+\]
+The recurrence for a new observation \((x_t,y_t)\) is
+\[
+  G_t = \alpha G_{t-1} + x_t x_t^T,\qquad
+  h_t = \alpha h_{t-1} + x_t y_t,\qquad
+  q_t = \alpha q_{t-1} + y_t^2 .
+\]
+The effective weight mass follows
+\[
+  s_t = \alpha s_{t-1}+1,\qquad s_0=0,
+\]
+but \(s_t\) is not an unweighted row count when \(\alpha<1\).
+
+\begin{theorem}[Correctness of exponential forgetting]
+The recurrence above maintains the exponentially weighted statistics
+defined by the closed-form sums.  If \(G_t\) is positive definite, the
+forgotten OLS coefficient vector is
+\[
+  \widehat{\beta}_t = G_t^{-1}h_t .
+\]
+\end{theorem}
+
+\begin{proof}
+Assume the closed form holds at time \(t-1\).  Then
+\[
+  \alpha G_{t-1} + x_t x_t^T
+  =
+  \alpha \sum_{i=1}^{t-1} \alpha^{t-1-i}x_i x_i^T + x_t x_t^T
+  =
+  \sum_{i=1}^{t} \alpha^{t-i}x_i x_i^T .
+\]
+The same induction proves the formulas for \(h_t\) and \(q_t\).  The
+coefficient formula then follows from the weighted OLS theorem with
+weights \(\alpha^{t-i}\).
+\end{proof}
+
+With both external weights and forgetting, a new weighted observation
+\((x_t,y_t,w_t)\) contributes
+\[
+  G_t = \alpha G_{t-1} + w_t x_t x_t^T,\qquad
+  h_t = \alpha h_{t-1} + w_t x_t y_t,\qquad
+  q_t = \alpha q_{t-1} + w_t y_t^2 .
+\]
+
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.26\linewidth}
+                >{\raggedright\arraybackslash}p{0.62\linewidth}}
+\hline
+Model or operation & Statistic update or solve \\
+\hline
+OLS & \(\widehat{\beta}=G^{-1}h\) when \(G\succ 0\). \\
+Append & Add \(xx^T\), \(xy\), \(y^2\), and one row count. \\
+Rolling drop & Subtract the departing row's \(xx^T\), \(xy\), and
+\(y^2\). \\
+Weighted OLS & Use \(G_w=\sum_i w_i x_i x_i^T\),
+\(h_w=\sum_i w_i x_i y_i\), \(q_w=\sum_i w_i y_i^2\). \\
+Ridge & Solve \((G+R)\widehat{\beta}=h\). \\
+Forgetting & Scale previous statistics by \(\alpha\), then append the
+new contribution. \\
+\hline
+\end{tabular}
+\end{center}
+
+\end{document}
