@@ -93,6 +93,8 @@ def test_public_api_exports():
         "ForgettingOLS",
         "IncrementalOLS",
         "NotFittedError",
+        "RankOneIncrementalOLS",
+        "RankOneRollingOLS",
         "RegressionDiagnostics",
         "RegressionError",
         "RollingOLS",

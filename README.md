@@ -26,6 +26,20 @@ rows is exact up to floating point roundoff.
 This is not stochastic gradient descent. `partial_fit` and `push` update exact
 sufficient statistics, not approximate optimizer state.
 
+### Prototype: rank-1 inverse maintenance
+
+- `RankOneIncrementalOLS` and `RankOneRollingOLS` additionally maintain the
+  inverse of the regularized Gram matrix with Sherman–Morrison rank-1 updates
+  (classical recursive least squares). Coefficients become a `Theta(p^2)`
+  matrix–vector product instead of a fresh `Theta(p^3)` dense solve on every
+  read, so appending a row or sliding a window and then reading coefficients is
+  `Theta(p^2)` per step. They reproduce the dense estimators' coefficients,
+  covariance, and loud-failure behavior, rebuilding the inverse exactly on a
+  bounded cadence to cap Sherman–Morrison drift. See
+  [`scripts/bench_rank_one.py`](scripts/bench_rank_one.py) and the rank-1
+  section of the
+  [performance note](docs/math/sufficient_statistics_ols_performance.pdf).
+
 ## Examples
 
 Append-only regression:
