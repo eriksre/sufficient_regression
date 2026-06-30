@@ -4,6 +4,18 @@ No open bugs are currently known.
 
 ## Review Findings Closed In This Build
 
+- Fixed: fresh workspaces lacked the gitignored `.venv` expected by the
+  documented development workflow. Tracked setup and test scripts now create
+  and activate `.venv` before Python commands.
+- Fixed: OLS models exposed coefficients and sufficient statistics but did not
+  expose classical coefficient covariance or standard errors. The estimators
+  now provide loud classical-OLS-only inference properties.
+- Fixed: `RollingOLS` defaulted `recompute_every` to `None`, disabling any
+  automatic drift guard for subtractive add/drop streams. It now recomputes from
+  the active ring buffer once per full window by default.
+- Fixed: batch `y` validation flattened row-vector targets shaped `(1, n)`,
+  silently treating columns as observations. Row-vector and multi-column targets
+  now raise `ValueError`.
 - Fixed: chunked and row-wise incremental tests used `IncrementalOLS.fit` as
   the oracle. They now use independent direct normal-equation references.
 - Fixed: `regularize_intercept=True` ridge behavior was untested. It now has

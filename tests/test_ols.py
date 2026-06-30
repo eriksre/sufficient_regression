@@ -552,6 +552,20 @@ def test_rolling_recompute_preserves_state_and_window_validation():
         RollingOLS(window=5, recompute_every=True)
 
 
+def test_rolling_default_recompute_cadence_is_one_window():
+    X, y, _, _ = make_data(n=10, p=3, seed=89)
+    model = RollingOLS(window=4, ridge=0.1)
+    assert model.recompute_every == 4
+
+    for x_row, y_value in zip(X[:4], y[:4], strict=True):
+        model.push(x_row, y_value)
+    assert model._updates_since_recompute == 0
+
+    model.push(X[4], y[4])
+    assert model._updates_since_recompute == 1
+    assert_params_equal(model, reference_params(X[1:5], y[1:5], ridge=0.1))
+
+
 def test_rolling_diagnostics_use_active_window_only():
     X, y, _, _ = make_data(n=70, p=3, seed=707)
     weights = np.linspace(0.3, 1.7, len(y))

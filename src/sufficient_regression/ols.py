@@ -530,7 +530,9 @@ class RollingOLS(_SufficientOLSBase):
                 name="recompute_every",
             )
         else:
-            self.recompute_every = None
+            # Rebuilding once per full window bounds add/drop roundoff without
+            # asking stream callers to choose a numerical drift guard up front.
+            self.recompute_every = self.window
         self._buffer: Deque[tuple[np.ndarray, float, float]] = deque()
         self._updates_since_recompute = 0
         super().__init__(
@@ -568,11 +570,6 @@ class RollingOLS(_SufficientOLSBase):
         self.n_observations_ = 0
         for z, y_value, weight in zip(X_aug, y_arr, weights, strict=True):
             self._push_prepared(z, float(y_value), float(weight))
-        if (
-            self.recompute_every is not None
-            and self._updates_since_recompute >= self.recompute_every
-        ):
-            self.recompute()
         self._dirty = True
         return self
 
@@ -590,11 +587,6 @@ class RollingOLS(_SufficientOLSBase):
         )
         for z, y_value, weight in zip(X_aug, y_arr, weights, strict=True):
             self._push_prepared(z, float(y_value), float(weight))
-        if (
-            self.recompute_every is not None
-            and self._updates_since_recompute >= self.recompute_every
-        ):
-            self.recompute()
         return self
 
     append = partial_fit
@@ -650,6 +642,8 @@ class RollingOLS(_SufficientOLSBase):
         self._buffer.append((z_copy, y_value, weight))
         self._add_row_stats(z_copy, y_value, weight)
         self._updates_since_recompute += 1
+        if self._updates_since_recompute >= self.recompute_every:
+            self.recompute()
         self._dirty = True
 
     def _row_stats(

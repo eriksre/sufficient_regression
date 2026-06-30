@@ -1,5 +1,17 @@
 # Fixed Bugs
 
+## 2026-07-01
+
+- Added tracked setup and test scripts that create `.venv` when absent,
+  activate it before Python commands, and install development dependencies.
+- Added classical OLS coefficient covariance, standard errors, residual
+  variance, and residual degrees-of-freedom properties with loud validation for
+  ridge, rank-deficient, zero-weight, and nonpositive-degree cases.
+- Changed `RollingOLS` to recompute sufficient statistics from the active ring
+  buffer once per full window by default.
+- Rejected row-vector and multi-column batch `y` targets instead of flattening
+  them.
+
 ## 2026-06-30
 
 - Fixed independent-oracle gaps in incremental streaming tests.

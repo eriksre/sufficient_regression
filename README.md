@@ -84,6 +84,8 @@ model.partial_fit(X_batch, y_batch)
   `weight_sum_` is the current effective weighted sample mass, so it decays in
   `ForgettingOLS`.
 - `RollingOLS.fit` on more rows than the window retains only the final window.
+- `RollingOLS` recomputes sufficient statistics from its active ring buffer
+  once per full window by default, bounding add/drop roundoff in long streams.
 - The implementation intentionally does not use a pseudoinverse fallback.
   Singular systems raise `SingularRegressionError`; use ridge when you want a
   regularized solution.
