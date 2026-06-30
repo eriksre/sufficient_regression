@@ -167,8 +167,8 @@ outer products, so the rolling sufficient-statistics cost is
 \]
 
 \begin{theorem}[Rolling speedup]
-Ignoring the common solve term, sufficient-statistics rolling updates
-reduce statistic maintenance from \(\Theta(Twp^2)\) to
+Ignoring the common solve term, the rolling sufficient-statistics method
+reduces statistic maintenance from \(\Theta(Twp^2)\) to
 \(\Theta(Tp^2)\).  The statistics-maintenance speedup is therefore
 \[
   \Theta(w).
@@ -205,15 +205,18 @@ costs for common OLS variants:
 Variant & Additional work & Update cost \\
 \hline
 Weighted OLS & Multiply the row contribution by \(w_i\). & \(\Theta(p^2)\) \\
-Ridge & Add a fixed penalty matrix before solving.  The dense
-implementation materializes and adds a \(p \times p\) matrix, so this
-pre-solve step is \(\Theta(p^2)\) even for diagonal ridge. & Solve
-remains \(\Theta(p^3)\) \\
+Ridge & Add fixed penalty before solving. & Solve: \(\Theta(p^3)\) \\
 Forgetting & Scale \(G\) by \(\alpha\), scale \(h\) and \(q\), then add
 the new row. & \(\Theta(p^2)\) \\
 \hline
 \end{array}
 \]
+
+The current dense implementation materializes and adds a \(p \times p\)
+penalty matrix, so the ridge pre-solve setup is \(\Theta(p^2)\) even
+when the penalty is diagonal.  This term is lower order than the dense
+\(\Theta(p^3)\) solve, but it is still the implementation's actual
+setup cost.
 
 Exponential forgetting does not need to rescan historical rows.  At
 time \(t\), all historical decay is represented by scaling the previous
