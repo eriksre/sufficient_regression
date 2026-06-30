@@ -33,3 +33,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Conductor workspace metadata
+.conductor/
