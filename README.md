@@ -86,16 +86,19 @@ model.partial_fit(X_batch, y_batch)
 
 ## Development
 
-Create a virtual environment and install the package in editable mode:
+Bootstrap a fresh workspace with a local virtual environment and editable dev
+install:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
+./scripts/setup-dev.sh
 ```
 
 Run tests with:
 
 ```bash
-pytest
+./scripts/test.sh
 ```
+
+The scripts create `.venv` when it is absent, then activate it before running
+Python. The `.venv` directory is intentionally gitignored and should not be
+committed.
