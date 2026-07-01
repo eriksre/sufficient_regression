@@ -35,13 +35,17 @@ sufficient statistics, not approximate optimizer state.
   matrix-vector product instead of a fresh `Theta(p^3)` dense solve on every
   read, so appending a row or sliding a window and then reading coefficients is
   `Theta(p^2)` per step. They reproduce the dense estimators' coefficients,
-  covariance, and loud-failure behavior, rebuilding the inverse exactly on a
-  bounded cadence to cap Sherman-Morrison drift. See
+  covariance, and loud-failure behavior. `RankOneRollingOLS` rebuilds on the
+  rolling recompute cadence; `RankOneIncrementalOLS` can do the same when
+  `refresh_every` is set. See
   [`scripts/bench_rank_one.py`](scripts/bench_rank_one.py) and the rank-1
   section of the
   [performance note](docs/math/sufficient_statistics_ols_performance.pdf).
 
 ## Examples
+
+See [Usage Examples](docs/usage.md) for fuller append-stream and rolling-window
+examples.
 
 Append-only regression:
 
@@ -81,6 +85,33 @@ model = RollingOLS(window=1000, ridge=1e-6)
 for x_row, y_value in stream:
     model.push(x_row, y_value)
     current_beta = model.params_
+```
+
+Append stream with rank-one inverse maintenance:
+
+```python
+from sufficient_regression import RankOneIncrementalOLS
+
+model = RankOneIncrementalOLS(ridge=1e-6)
+model.fit(X_initial, y_initial)
+_ = model.params_  # Builds the maintained inverse.
+
+for x_row, y_value in stream:
+    model.push(x_row, y_value)
+    current_beta = model.params_
+```
+
+Rolling-window regression with rank-one inverse maintenance:
+
+```python
+from sufficient_regression import RankOneRollingOLS
+
+model = RankOneRollingOLS(window=1000, ridge=1e-6)
+
+for x_row, y_value in stream:
+    model.push(x_row, y_value)
+    if model.window_size_ == model.window:
+        current_beta = model.params_
 ```
 
 Exponential forgetting:
