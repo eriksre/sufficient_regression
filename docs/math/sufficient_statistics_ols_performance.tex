@@ -294,6 +294,71 @@ so rolling memory is
 \]
 This is still independent of the total stream length.
 
+\section{Maintaining a factorization: rank-1 inverse updates}
+\label{sec:rank1}
+
+The analysis above maintains the sufficient statistics incrementally but
+still recovers coefficients with a fresh dense solve, which is
+\(\Theta(p^3)\) on every request.  The remaining \(\Theta(p^3)\) term can
+be removed for the append and rolling cases by maintaining a
+factorization of the regularized Gram matrix in addition to the
+statistics.  Let
+\[
+  A = G + R, \qquad M = A^{-1},
+\]
+where \(R\) is the fixed ridge penalty matrix.  Because \(R\) does not
+change, every row contribution moves \(A\) by a single rank-1 term: an
+appended or departing weighted row \((z, w)\) gives
+\[
+  A' = A + c\,zz^T, \qquad c = \pm w
+\]
+(\(+w\) to add, \(-w\) to drop).  The Sherman--Morrison identity updates
+the inverse directly:
+\[
+  M' = M - \frac{c}{1 + c\,z^T M z}\,(Mz)(Mz)^T .
+\]
+Forming \(Mz\) is \(\Theta(p^2)\), and the rank-1 correction is another
+\(\Theta(p^2)\) outer product, so each update is \(\Theta(p^2)\).
+Coefficients are then a matrix--vector product
+\[
+  \beta = M\,h,
+\]
+which is also \(\Theta(p^2)\).
+
+\begin{theorem}[Per-step cost with maintained inverse]
+With an incrementally maintained inverse, appending a row and reading
+coefficients costs \(\Theta(p^2)\) per step, and a rolling slide (one
+downdate plus one update) followed by a read costs \(\Theta(p^2)\) per
+step.  This removes the \(\Theta(p^3)\) per-read solve from the
+solve-after-each append stream and from the rolling stream.
+\end{theorem}
+
+\begin{proof}
+Each step performs a constant number of matrix--vector products and
+rank-1 outer products on \(p \times p\) data, each \(\Theta(p^2)\), and
+no dense \(p \times p\) solve or factorization from scratch.
+\end{proof}
+
+Three practical points bound the result.  First, \(M\) exists only once
+\(A\) is invertible, so an implementation either seeds it from a ridge
+prior or builds it lazily once enough rows accumulate; rows added before
+that point update only \(G\) and are folded in by the first build.
+Second, repeated Sherman--Morrison updates accumulate floating-point
+error, and downdates are the unstable direction, so a periodic exact
+refactorization every \(K\) updates caps the drift at an amortized
+\(\Theta(p^3/K)\) per step while keeping the per-step cost \(\Theta(p^2)\)
+for the common case.  Third, a downdate whose denominator
+\(1 + c\,z^T M z\) collapses signals that removing the row makes \(A\)
+singular; the maintained inverse is then discarded and rebuilt from the
+exact \(G\), so the singular case still fails loudly rather than
+propagating a blown-up inverse.
+
+This trick is the classical recursive-least-squares update.  It is
+prototyped by the rank-1 incremental and rolling estimators.
+Exponential forgetting is not covered there: its ridge term is not
+decayed alongside \(G\), so the regularized system does not reduce to a
+single clean rank-1 recursion.
+
 \section{Interpretation}
 
 For the million-plus-1000 append case, the sufficient-statistics
@@ -304,9 +369,13 @@ replacing each full-window rebuild with one subtract and one add.
 The headline asymptotic speedups are exact for statistic maintenance:
 1001 for a final million-plus-1000 append rebuild, \(\Theta(n)\) for
 solve-after-each append streams, and \(\Theta(1000)\) for a rolling
-window of size 1000.  End-to-end wall-clock speedups in the default
-estimators are bounded by the unchanged dense solve cost.  The
-append-only Cholesky prototype removes that dense solve from the hot
-path after the first successful factorization.
+window of size 1000.  With a cold dense solve on every request,
+end-to-end wall-clock speedups are bounded by the unchanged dense solve
+cost.  The append-only Cholesky prototype removes that dense solve from
+the append hot path after the first successful factorization.  The
+rank-1 inverse-maintenance prototype of Section~\ref{sec:rank1} lifts
+that bound for both the append and rolling cases by replacing the
+per-read \(\Theta(p^3)\) solve with a \(\Theta(p^2)\) update and
+matrix--vector product.
 
 \end{document}

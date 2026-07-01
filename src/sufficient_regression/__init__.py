@@ -10,12 +10,15 @@ from .ols import (
     RollingOLS,
     SingularRegressionError,
 )
+from .rank_one import RankOneIncrementalOLS, RankOneRollingOLS
 
 __all__ = [
     "CholeskyIncrementalOLS",
     "ForgettingOLS",
     "IncrementalOLS",
     "NotFittedError",
+    "RankOneIncrementalOLS",
+    "RankOneRollingOLS",
     "RegressionDiagnostics",
     "RegressionError",
     "RollingOLS",

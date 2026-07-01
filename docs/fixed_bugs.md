@@ -2,6 +2,9 @@
 
 ## 2026-07-01
 
+- Invalidated `RankOneRollingOLS`'s maintained inverse before recomputing
+  rolling sufficient statistics, preventing stale Sherman-Morrison updates
+  during ring-buffer replay.
 - Made `scripts/test.sh` bootstrap dev dependencies when an existing `.venv`
   lacks pytest.
 - Added tracked setup and test scripts that create `.venv` when absent,

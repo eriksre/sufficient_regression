@@ -4,6 +4,10 @@ No open bugs are currently known.
 
 ## Review Findings Closed In This Build
 
+- Fixed: `RankOneRollingOLS.recompute()` invalidated the maintained inverse only
+  after replaying buffered rows, so recompute could apply Sherman-Morrison
+  updates to a stale inverse before discarding it. It now invalidates before
+  rebuilding sufficient statistics.
 - Fixed: fresh workspaces lacked the gitignored `.venv` expected by the
   documented development workflow. Tracked setup and test scripts now create
   and activate `.venv` before Python commands.
