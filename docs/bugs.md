@@ -21,6 +21,9 @@ No open bugs are currently known.
 - Fixed: Windows LAPACK could return an unstable value instead of raising for
   an exactly rank-deficient unregularized system. Cold unregularized solves now
   perform an explicit rank check, making loud singular failure cross-platform.
+- Fixed: the initial Linux wheel configuration implicitly expanded into
+  32-bit and musl artifacts that were outside the supported release targets.
+  Linux wheel support is now explicit: manylinux x86_64 on CPython 3.10-3.14.
 - Fixed: `RankOneRollingOLS.recompute()` invalidated the maintained inverse only
   after replaying buffered rows, so recompute could apply Sherman-Morrison
   updates to a stale inverse before discarding it. It now invalidates before

@@ -41,6 +41,7 @@ show_missing = true
 
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_*"
 test-command = "python -m pytest {project}/tests"
 test-requires = [
   "pytest>=8",
@@ -50,6 +51,9 @@ test-requires = [
 
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
 
 [tool.cibuildwheel.windows]
 # The scientific reference dependencies do not publish 32-bit Windows wheels.

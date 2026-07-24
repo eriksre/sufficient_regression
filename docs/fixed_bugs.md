@@ -15,6 +15,8 @@
   failed to resolve supported scientific reference dependencies.
 - Made unregularized singularity detection explicit instead of relying on
   platform-specific `np.linalg.solve` failure behavior.
+- Made the Linux binary support boundary explicit at manylinux x86_64 instead
+  of accidentally building unclaimed 32-bit and musl variants.
 
 ## 2026-07-01
 
