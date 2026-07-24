@@ -4,6 +4,17 @@ No open bugs are currently known.
 
 ## Review Findings Closed In This Build
 
+- Fixed: the rank-one estimators reduced arithmetic complexity to
+  `Theta(p^2)` but executed each row through dozens of Python/NumPy calls and
+  temporary arrays, making 1,000-row rolling windows slower than vectorized
+  full refits. The production path now fuses statistics, inverse, and direct
+  coefficient updates in a compiled kernel and stores rolling rows contiguously.
+- Fixed: the development environment did not include the `build` frontend
+  needed to verify wheel and source distributions. It is now a development
+  dependency, and native wheels are built and tested in CI.
+- Fixed: the first native source distribution omitted `_native.pyx`, so an
+  installation from that archive could not compile the required extension. The
+  Cython source is now explicitly included and the built archive is install-tested.
 - Fixed: `RankOneRollingOLS.recompute()` invalidated the maintained inverse only
   after replaying buffered rows, so recompute could apply Sherman-Morrison
   updates to a stale inverse before discarding it. It now invalidates before

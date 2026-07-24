@@ -1,4 +1,4 @@
-"""Prototype: O(p^2)-per-step coefficients via incremental inverse maintenance.
+"""Native O(p^2)-per-step coefficients via incremental inverse maintenance.
 
 The base estimators in :mod:`sufficient_regression.ols` maintain the sufficient
 statistics ``XtX``, ``Xty`` and ``yty`` incrementally, but recover coefficients
@@ -8,7 +8,7 @@ is ``Theta(p^3)`` per call, so the performance note correctly observes that
 unless the implementation also updates or reuses a factorization"
 (``sufficient_statistics_ols_performance.tex``).
 
-This module prototypes the missing piece. It maintains the inverse of the
+This module implements the missing piece. It maintains the inverse of the
 regularized Gram matrix
 
     A = XtX + R          (R is the fixed ridge penalty matrix)
@@ -23,12 +23,15 @@ a rank-1 update of ``M`` costing ``Theta(p^2)``. Coefficients are then
 which is ``Theta(p^2)``, not ``Theta(p^3)``. This is the classic recursive least
 squares / Sherman-Morrison trick behind ``statsmodels.RecursiveLS`` and friends.
 
-Status
-------
-This is a prototype. The dense estimators in :mod:`ols` remain the reference
-implementation and are exact up to a single solve's roundoff. Sherman-Morrison
-updates accumulate additional floating-point error across a stream (downdates
-especially), so these estimators:
+Implementation
+--------------
+Small and medium sequential updates are fused in a compiled Cython kernel:
+validation crosses the Python/native boundary once, then sufficient statistics,
+inverse state, and coefficients are updated together without p-by-p Python
+temporaries. Wide systems use NumPy's optimized BLAS kernels for higher
+matrix-vector throughput. The dense estimators in :mod:`ols` remain the
+correctness reference. Sherman-Morrison updates accumulate floating-point error
+across a stream (downdates especially), so these estimators:
 
 - rebuild ``M`` exactly from ``XtX`` on a bounded cadence to cap drift, and
 - still expose the exact maintained ``XtX``/``Xty`` for any caller that wants a
@@ -45,16 +48,17 @@ Assumptions / scope
   silently absorbed: the inverse is invalidated so the next solve rebuilds from
   ``XtX`` and fails loudly via :class:`SingularRegressionError` if truly
   singular. This is a rebuild trigger, not a different-answer fallback.
-- ``ForgettingOLS`` is intentionally not prototyped here: its ridge term is not
+- ``ForgettingOLS`` is intentionally not implemented here: its ridge term is not
   decayed alongside ``XtX``, so the regularized system does not reduce to a clean
   single rank-1 recursion. Pure (ridge=0) forgetting would, but is left out to
-  keep the prototype's invariants simple.
+  keep the native kernel's invariants simple.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from . import _native
 from .ols import (
     RollingOLS,
     SingularRegressionError,
@@ -73,6 +77,70 @@ from .ols import (
 # system really is singular. The threshold is on the dimensionless quantity
 # ``1 + c * z^T M z`` (c = +/- weight), which is O(1) for well-posed systems.
 _SHERMAN_MORRISON_MIN_DENOM = 1e-10
+# Scalar native loops avoid dispatch overhead for small and medium systems.
+# At this width, optimized BLAS matrix-vector kernels overtake the scalar loop
+# on supported NumPy builds. A fixed boundary keeps execution deterministic.
+_BLAS_TRANSITION_MIN_PARAMS = 256
+
+
+def _scalar_weight(sample_weight: float | None) -> float:
+    """Validate and return one row weight without allocating a length-one array."""
+
+    if sample_weight is None:
+        return 1.0
+    weight_array = np.asarray(sample_weight, dtype=float)
+    if weight_array.ndim == 0:
+        weight = float(weight_array)
+    elif weight_array.ndim == 1 and weight_array.shape[0] == 1:
+        weight = float(weight_array[0])
+    else:
+        raise ValueError("sample_weight must be one scalar value for push.")
+    if not np.isfinite(weight):
+        raise ValueError("sample_weight must be finite.")
+    if weight < 0:
+        raise ValueError("sample_weight cannot be negative.")
+    return weight
+
+
+def _prepared_augmented_row(
+    model: _SufficientOLSBase,
+    x,
+    y: float,
+    sample_weight: float | None,
+) -> tuple[np.ndarray, float, float]:
+    """Validate one public ``push`` input and construct its native row once."""
+
+    X_row = _as_single_row(x, name="x")
+    y_value = float(_as_single_value(y, name="y")[0])
+    weight = _scalar_weight(sample_weight)
+    if model.n_features_in_ is None:
+        raise RuntimeError("Single-row native preparation requires fitted state.")
+    if X_row.shape[1] != model.n_features_in_:
+        raise ValueError(
+            "X has a different number of features than the fitted state; "
+            f"expected {model.n_features_in_}, got {X_row.shape[1]}."
+        )
+    if model.fit_intercept:
+        row = np.empty(model.n_params_, dtype=float)
+        row[0] = 1.0
+        row[1:] = X_row[0]
+    else:
+        row = np.ascontiguousarray(X_row[0], dtype=float)
+    return row, y_value, weight
+
+
+def _add_scalar_statistics(
+    model: _SufficientOLSBase,
+    y: np.ndarray,
+    weights: np.ndarray,
+) -> None:
+    """Update non-matrix statistics after a native batch transition."""
+
+    weighted_y = weights * y
+    model._yty += float(weighted_y @ y)
+    model._y_sum += float(weights @ y)
+    model.weight_sum_ += float(np.sum(weights))
+    model.n_observations_ += int(y.shape[0])
 
 
 def _invert_regularized_gram(A: np.ndarray) -> np.ndarray:
@@ -98,11 +166,6 @@ class _RecursiveInverseMixin:
     Mixed in ahead of a :class:`_SufficientOLSBase` subclass so that the exact
     sufficient statistics are still maintained by the base, while the coefficient
     solve reuses the incrementally maintained inverse.
-
-    The subclass is responsible for calling :meth:`_sherman_morrison` once per
-    weighted row contribution (sign ``+1`` to add, ``-1`` to drop) and for
-    setting ``self.refresh_every`` (``None`` disables the periodic exact
-    rebuild).
     """
 
     def _reset_state(self) -> None:
@@ -126,46 +189,43 @@ class _RecursiveInverseMixin:
 
         if self._inv is None:
             self._inv = _invert_regularized_gram(self._regularized_gram())
+            # The solve can differ by a few ulps across triangles. The native
+            # kernel preserves exact symmetry after this one-time projection.
+            self._inv = np.ascontiguousarray(
+                0.5 * (self._inv + self._inv.T),
+                dtype=float,
+            )
             self._inv_updates = 0
         return self._inv
 
-    def _sherman_morrison(self, z: np.ndarray, weight: float, sign: float) -> None:
-        """Apply ``A -> A + sign * weight * z z^T`` to the maintained inverse.
+    def _blas_recursive_update(
+        self,
+        z: np.ndarray,
+        y_value: float,
+        weight: float,
+        *,
+        sign: float,
+    ) -> bool:
+        """Update inverse and coefficients using wide-matrix BLAS operations."""
 
-        Sherman-Morrison: with ``c = sign * weight``, ``u = M z`` and
-        ``denom = 1 + c * z^T u``,
-
-            M <- M - (c / denom) * u u^T.
-
-        For an add (``sign=+1``, weight>=0) ``denom >= 1`` always. For a drop the
-        denominator can collapse if removing the row makes ``A`` singular; see the
-        guard below.
-        """
-
-        if self._inv is None or weight == 0.0:
-            return
-        c = sign * float(weight)
-        u = self._inv @ z
-        denom = 1.0 + c * float(z @ u)
-        if not np.isfinite(denom) or abs(denom) <= _SHERMAN_MORRISON_MIN_DENOM:
-            # The (down)date drove the regularized system to (near-)singular.
-            # Invalidate so the next solve rebuilds from XtX and raises loudly if
-            # the system is genuinely singular, rather than propagating a blown-up
-            # inverse silently.
-            self._inv = None
-            self._inv_updates = 0
-            return
-        updated = self._inv - (c / denom) * np.outer(u, u)
-        # Sherman-Morrison preserves symmetry mathematically; the explicit
-        # average prevents roundoff asymmetry from feeding future updates.
-        self._inv = 0.5 * (updated + updated.T)
-        self._inv_updates += 1
-        if self.refresh_every is not None and self._inv_updates >= self.refresh_every:
-            # Periodic exact rebuild caps Sherman-Morrison drift over long
-            # streams. Deferred to the next solve by invalidating rather than
-            # rebuilding here, so callers that never read coefficients never pay.
-            self._inv = None
-            self._inv_updates = 0
+        if weight == 0.0:
+            return True
+        c = sign * weight
+        update_direction = self._inv @ z
+        denominator = 1.0 + c * float(z @ update_direction)
+        if (
+            not np.isfinite(denominator)
+            or abs(denominator) <= _SHERMAN_MORRISON_MIN_DENOM
+        ):
+            return False
+        residual = y_value - float(z @ self._params_cache)
+        scale = c / denominator
+        self._params_cache += scale * update_direction * residual
+        # The initial inverse is projected to exact symmetry, and the outer
+        # correction is bitwise symmetric, so per-update symmetrization would
+        # only add another full p-by-p allocation.
+        self._inv -= scale * np.outer(update_direction, update_direction)
+        return True
 
     def _solve_params(self) -> np.ndarray:
         self._require_stats()
@@ -190,7 +250,7 @@ class _RecursiveInverseMixin:
 
 
 class RankOneIncrementalOLS(_RecursiveInverseMixin, _SufficientOLSBase):
-    """Prototype append-only OLS with O(p^2)-per-step coefficients.
+    """Native append-only OLS with O(p^2)-per-step coefficients.
 
     Behaves like :class:`~sufficient_regression.IncrementalOLS` but maintains the
     inverse of the regularized Gram matrix so that both row appends and
@@ -257,14 +317,78 @@ class RankOneIncrementalOLS(_RecursiveInverseMixin, _SufficientOLSBase):
         if self.n_features_in_ is None:
             return self.fit(X, y, sample_weight=sample_weight)
         _, X_aug, y_arr, weights = self._validate_X_y(X, y, sample_weight, reset=False)
-        self._add_stats(
-            *_weighted_stats(X_aug, y_arr, weights), n_rows=y_arr.shape[0]
+        X_aug = np.ascontiguousarray(X_aug, dtype=float)
+        y_arr = np.ascontiguousarray(y_arr, dtype=float)
+        weights = np.ascontiguousarray(weights, dtype=float)
+        if self._inv is None:
+            self._add_stats(
+                *_weighted_stats(X_aug, y_arr, weights),
+                n_rows=y_arr.shape[0],
+            )
+            return self
+
+        if self._params_cache is None:
+            # Internal callers can build the inverse directly; keep the native
+            # state invariant explicit rather than assuming params_ did it.
+            self._params_cache = self._inv @ self._xty
+        if self.n_params_ >= _BLAS_TRANSITION_MIN_PARAMS:
+            processed = 0
+            inverse_valid = True
+            inverse_updates = 0
+            for row, y_value, weight in zip(
+                X_aug,
+                y_arr,
+                weights,
+                strict=True,
+            ):
+                self._xtx += float(weight) * np.outer(row, row)
+                self._xty += float(weight) * row * float(y_value)
+                processed += 1
+                inverse_valid = self._blas_recursive_update(
+                    row,
+                    float(y_value),
+                    float(weight),
+                    sign=1.0,
+                )
+                if not inverse_valid:
+                    break
+                inverse_updates += int(weight != 0.0)
+        else:
+            processed, inverse_valid, inverse_updates = _native.append_update(
+                self._xtx,
+                self._xty,
+                self._inv,
+                self._params_cache,
+                X_aug,
+                y_arr,
+                weights,
+                _SHERMAN_MORRISON_MIN_DENOM,
+            )
+        if processed < y_arr.shape[0]:
+            remaining = slice(processed, None)
+            xtx, xty, _, _, _ = _weighted_stats(
+                X_aug[remaining],
+                y_arr[remaining],
+                weights[remaining],
+            )
+            self._xtx += xtx
+            self._xty += xty
+        _add_scalar_statistics(self, y_arr, weights)
+        self._inv_updates += int(inverse_updates)
+
+        refresh_due = (
+            self.refresh_every is not None
+            and self._inv_updates >= self.refresh_every
         )
-        # Update the maintained inverse one row at a time. Skipped while the
-        # inverse is unbuilt (warm-up); the lazy rebuild from XtX stays exact.
-        if self._inv is not None:
-            for z, weight in zip(X_aug, weights, strict=True):
-                self._sherman_morrison(z, float(weight), sign=1.0)
+        if not inverse_valid or refresh_due:
+            # A refresh is part of the numerical contract: exact statistics
+            # remain current and the next coefficient read rebuilds from them.
+            self._inv = None
+            self._params_cache = None
+            self._inv_updates = 0
+            self._dirty = True
+        else:
+            self._dirty = False
         return self
 
     append = partial_fit
@@ -276,15 +400,74 @@ class RankOneIncrementalOLS(_RecursiveInverseMixin, _SufficientOLSBase):
         *,
         sample_weight: float | None = None,
     ) -> "RankOneIncrementalOLS":
-        return self.partial_fit(
-            _as_single_row(x, name="x"),
-            _as_single_value(y, name="y"),
-            sample_weight=_as_single_weight(sample_weight),
+        if self.n_features_in_ is None:
+            return self.fit(
+                _as_single_row(x, name="x"),
+                _as_single_value(y, name="y"),
+                sample_weight=_as_single_weight(sample_weight),
+            )
+        row, y_value, weight = _prepared_augmented_row(
+            self,
+            x,
+            y,
+            sample_weight,
         )
+        if self._inv is None:
+            _native.stats_add(self._xtx, self._xty, row, y_value, weight)
+            self._yty += weight * y_value * y_value
+            self._y_sum += weight * y_value
+            self.weight_sum_ += weight
+            self.n_observations_ += 1
+            self._dirty = True
+            return self
+
+        if self._params_cache is None:
+            self._params_cache = self._inv @ self._xty
+        if self.n_params_ >= _BLAS_TRANSITION_MIN_PARAMS:
+            self._xtx += weight * np.outer(row, row)
+            self._xty += weight * row * y_value
+            inverse_valid = self._blas_recursive_update(
+                row,
+                y_value,
+                weight,
+                sign=1.0,
+            )
+            inverse_updates = int(weight != 0.0 and inverse_valid)
+        else:
+            row_batch = row.reshape(1, -1)
+            target = np.asarray([y_value], dtype=float)
+            weights = np.asarray([weight], dtype=float)
+            _, inverse_valid, inverse_updates = _native.append_update(
+                self._xtx,
+                self._xty,
+                self._inv,
+                self._params_cache,
+                row_batch,
+                target,
+                weights,
+                _SHERMAN_MORRISON_MIN_DENOM,
+            )
+        self._yty += weight * y_value * y_value
+        self._y_sum += weight * y_value
+        self.weight_sum_ += weight
+        self.n_observations_ += 1
+        self._inv_updates += int(inverse_updates)
+        refresh_due = (
+            self.refresh_every is not None
+            and self._inv_updates >= self.refresh_every
+        )
+        if not inverse_valid or refresh_due:
+            self._inv = None
+            self._params_cache = None
+            self._inv_updates = 0
+            self._dirty = True
+        else:
+            self._dirty = False
+        return self
 
 
 class RankOneRollingOLS(_RecursiveInverseMixin, RollingOLS):
-    """Prototype fixed-window OLS with O(p^2)-per-slide coefficients.
+    """Native fixed-window OLS with O(p^2)-per-slide coefficients.
 
     Each slide is one rank-1 downdate (departing row) and one rank-1 update
     (arriving row) of the maintained inverse, so a full ``params_`` read after
@@ -296,26 +479,287 @@ class RankOneRollingOLS(_RecursiveInverseMixin, RollingOLS):
     roundoff in the dense estimator.
     """
 
-    # The base RollingOLS already rebuilds XtX every recompute_every pushes;
-    # tying the inverse rebuild to that cadence (via recompute()) is sufficient,
-    # so no independent periodic refresh is needed here.
+    # Rolling rows live in contiguous arrays rather than the base class's deque.
+    # The native transition can therefore consume both rows without constructing
+    # Python tuples or allocating p-by-p temporaries.
     refresh_every: int | None = None
 
-    def _add_row_stats(self, z: np.ndarray, y_value: float, weight: float) -> None:
-        super()._add_row_stats(z, y_value, weight)
-        self._sherman_morrison(z, weight, sign=1.0)
+    def _reset_state(self) -> None:
+        super()._reset_state()
+        self._row_buffer: np.ndarray | None = None
+        self._target_buffer: np.ndarray | None = None
+        self._weight_buffer: np.ndarray | None = None
+        self._buffer_start = 0
+        self._buffer_length = 0
 
-    def _drop_row_stats(self, z: np.ndarray, y_value: float, weight: float) -> None:
-        super()._drop_row_stats(z, y_value, weight)
-        self._sherman_morrison(z, weight, sign=-1.0)
+    @property
+    def window_size_(self) -> int:
+        return self._buffer_length
+
+    def _allocate_buffers(self) -> None:
+        self._row_buffer = np.empty((self.window, self.n_params_), dtype=float)
+        self._target_buffer = np.empty(self.window, dtype=float)
+        self._weight_buffer = np.empty(self.window, dtype=float)
+        self._buffer_start = 0
+        self._buffer_length = 0
+
+    def fit(
+        self,
+        X,
+        y,
+        *,
+        sample_weight=None,
+    ) -> "RankOneRollingOLS":
+        self._reset_state()
+        _, X_aug, y_arr, weights = self._validate_X_y(
+            X,
+            y,
+            sample_weight,
+            reset=True,
+        )
+        X_aug = np.ascontiguousarray(X_aug[-self.window :], dtype=float)
+        y_arr = np.ascontiguousarray(y_arr[-self.window :], dtype=float)
+        weights = np.ascontiguousarray(weights[-self.window :], dtype=float)
+        self._allocate_buffers()
+        self._buffer_length = y_arr.shape[0]
+        self._row_buffer[: self._buffer_length] = X_aug
+        self._target_buffer[: self._buffer_length] = y_arr
+        self._weight_buffer[: self._buffer_length] = weights
+        (
+            self._xtx,
+            self._xty,
+            self._yty,
+            self._y_sum,
+            self.weight_sum_,
+        ) = _weighted_stats(X_aug, y_arr, weights)
+        self._xtx = np.ascontiguousarray(self._xtx, dtype=float)
+        self._xty = np.ascontiguousarray(self._xty, dtype=float)
+        self.n_observations_ = int(y_arr.shape[0])
+        self._updates_since_recompute = 0
+        self._dirty = True
+        return self
+
+    def partial_fit(
+        self,
+        X,
+        y,
+        *,
+        sample_weight=None,
+    ) -> "RankOneRollingOLS":
+        if self.n_features_in_ is None:
+            return self.fit(X, y, sample_weight=sample_weight)
+        _, X_aug, y_arr, weights = self._validate_X_y(
+            X,
+            y,
+            sample_weight,
+            reset=False,
+        )
+        X_aug = np.ascontiguousarray(X_aug, dtype=float)
+        for row, y_value, weight in zip(X_aug, y_arr, weights, strict=True):
+            self._push_prepared_native(row, float(y_value), float(weight))
+        return self
+
+    append = partial_fit
+
+    def push(
+        self,
+        x,
+        y: float,
+        *,
+        sample_weight: float | None = None,
+    ) -> "RankOneRollingOLS":
+        if self.n_features_in_ is None:
+            return self.fit(
+                _as_single_row(x, name="x"),
+                _as_single_value(y, name="y"),
+                sample_weight=_as_single_weight(sample_weight),
+            )
+        row, y_value, weight = _prepared_augmented_row(
+            self,
+            x,
+            y,
+            sample_weight,
+        )
+        self._push_prepared_native(row, y_value, weight)
+        return self
+
+    def _push_prepared_native(
+        self,
+        row: np.ndarray,
+        y_value: float,
+        weight: float,
+    ) -> None:
+        self._require_stats()
+        if self._row_buffer is None:
+            raise RuntimeError("Rolling native buffers are not initialized.")
+
+        if self._buffer_length < self.window:
+            insert_at = (
+                self._buffer_start + self._buffer_length
+            ) % self.window
+            if self._inv is None:
+                if self.n_params_ >= _BLAS_TRANSITION_MIN_PARAMS:
+                    self._xtx += weight * np.outer(row, row)
+                    self._xty += weight * row * y_value
+                else:
+                    _native.stats_add(
+                        self._xtx,
+                        self._xty,
+                        row,
+                        y_value,
+                        weight,
+                    )
+                self._dirty = True
+            else:
+                if self._params_cache is None:
+                    self._params_cache = self._inv @ self._xty
+                if self.n_params_ >= _BLAS_TRANSITION_MIN_PARAMS:
+                    self._xtx += weight * np.outer(row, row)
+                    self._xty += weight * row * y_value
+                    inverse_valid = self._blas_recursive_update(
+                        row,
+                        y_value,
+                        weight,
+                        sign=1.0,
+                    )
+                    inverse_updates = int(weight != 0.0 and inverse_valid)
+                else:
+                    _, inverse_valid, inverse_updates = _native.append_update(
+                        self._xtx,
+                        self._xty,
+                        self._inv,
+                        self._params_cache,
+                        row.reshape(1, -1),
+                        np.asarray([y_value], dtype=float),
+                        np.asarray([weight], dtype=float),
+                        _SHERMAN_MORRISON_MIN_DENOM,
+                    )
+                self._inv_updates += int(inverse_updates)
+                if inverse_valid:
+                    self._dirty = False
+                else:
+                    self._invalidate_inverse()
+            self._buffer_length += 1
+            self.n_observations_ += 1
+        else:
+            insert_at = self._buffer_start
+            old_row = self._row_buffer[insert_at]
+            old_y = float(self._target_buffer[insert_at])
+            old_weight = float(self._weight_buffer[insert_at])
+            if self._inv is None:
+                if self.n_params_ >= _BLAS_TRANSITION_MIN_PARAMS:
+                    self._xtx -= old_weight * np.outer(old_row, old_row)
+                    self._xty -= old_weight * old_row * old_y
+                    self._xtx += weight * np.outer(row, row)
+                    self._xty += weight * row * y_value
+                else:
+                    _native.stats_slide(
+                        self._xtx,
+                        self._xty,
+                        old_row,
+                        old_y,
+                        old_weight,
+                        row,
+                        y_value,
+                        weight,
+                    )
+                self._dirty = True
+            else:
+                if self._params_cache is None:
+                    self._params_cache = self._inv @ self._xty
+                if self.n_params_ >= _BLAS_TRANSITION_MIN_PARAMS:
+                    self._xtx -= old_weight * np.outer(old_row, old_row)
+                    self._xty -= old_weight * old_row * old_y
+                    self._xtx += weight * np.outer(row, row)
+                    self._xty += weight * row * y_value
+                    inverse_valid = self._blas_recursive_update(
+                        old_row,
+                        old_y,
+                        old_weight,
+                        sign=-1.0,
+                    )
+                    if inverse_valid:
+                        inverse_valid = self._blas_recursive_update(
+                            row,
+                            y_value,
+                            weight,
+                            sign=1.0,
+                        )
+                else:
+                    inverse_valid = _native.rolling_update(
+                        self._xtx,
+                        self._xty,
+                        self._inv,
+                        self._params_cache,
+                        old_row,
+                        old_y,
+                        old_weight,
+                        row,
+                        y_value,
+                        weight,
+                        _SHERMAN_MORRISON_MIN_DENOM,
+                    )
+                if inverse_valid:
+                    self._inv_updates += int(old_weight != 0.0)
+                    self._inv_updates += int(weight != 0.0)
+                    self._dirty = False
+                else:
+                    self._invalidate_inverse()
+            self._yty -= old_weight * old_y * old_y
+            self._y_sum -= old_weight * old_y
+            self.weight_sum_ -= old_weight
+            self._buffer_start = (self._buffer_start + 1) % self.window
+
+        self._row_buffer[insert_at] = row
+        self._target_buffer[insert_at] = y_value
+        self._weight_buffer[insert_at] = weight
+        self._yty += weight * y_value * y_value
+        self._y_sum += weight * y_value
+        self.weight_sum_ += weight
+        self._updates_since_recompute += 1
+        if self._updates_since_recompute >= self.recompute_every:
+            self.recompute()
+
+    def _invalidate_inverse(self) -> None:
+        self._inv = None
+        self._params_cache = None
+        self._inv_updates = 0
+        self._dirty = True
+
+    def _ordered_buffer_views(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self._row_buffer is None or self._buffer_length == 0:
+            raise SingularRegressionError("The rolling window is empty.")
+        indices = (
+            self._buffer_start + np.arange(self._buffer_length)
+        ) % self.window
+        return (
+            np.ascontiguousarray(self._row_buffer[indices]),
+            np.ascontiguousarray(self._target_buffer[indices]),
+            np.ascontiguousarray(self._weight_buffer[indices]),
+        )
 
     def recompute(self) -> "RankOneRollingOLS":
-        # The base recompute rebuilds XtX by replaying buffered rows through
-        # _add_row_stats. Invalidate first so those row replays do not update a
-        # stale inverse for a system that is being reconstructed from scratch.
-        self._inv = None
-        self._inv_updates = 0
-        result = super().recompute()
-        # XtX was just rebuilt exactly from the ring buffer; rebuild M from it on
-        # the next solve so the maintained inverse cannot drift past one window.
-        return result
+        self._require_stats()
+        rows, targets, weights = self._ordered_buffer_views()
+        (
+            self._xtx,
+            self._xty,
+            self._yty,
+            self._y_sum,
+            self.weight_sum_,
+        ) = _weighted_stats(rows, targets, weights)
+        self._xtx = np.ascontiguousarray(self._xtx, dtype=float)
+        self._xty = np.ascontiguousarray(self._xty, dtype=float)
+        self.n_observations_ = self._buffer_length
+        self._updates_since_recompute = 0
+        self._invalidate_inverse()
+        return self
+
+    def current_window(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        self._require_stats()
+        rows, targets, weights = self._ordered_buffer_views()
+        if self.fit_intercept:
+            rows = rows[:, 1:]
+        return rows.copy(), targets.copy(), weights.copy()

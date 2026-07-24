@@ -1,0 +1,1 @@
+include src/sufficient_regression/_native.pyx

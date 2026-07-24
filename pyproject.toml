@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "wheel", "Cython>=3.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "sufficient-regression"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python package for sufficient regression."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2",
   "pytest-cov>=7",
   "pytest>=8",
   "scikit-learn>=1.4",
@@ -37,3 +38,15 @@ source = ["sufficient_regression"]
 [tool.coverage.report]
 fail_under = 90
 show_missing = true
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+test-command = "python -m pytest {project}/tests"
+test-requires = [
+  "pytest>=8",
+  "scikit-learn>=1.4",
+  "statsmodels>=0.14"
+]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]

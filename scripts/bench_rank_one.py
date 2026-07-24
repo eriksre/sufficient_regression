@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Benchmark the rank-1 incremental-inverse prototype against the dense solve.
+"""Benchmark native rank-1 inverse maintenance against the dense solve.
 
 The performance note shows that maintaining sufficient statistics removes
 repeated row scans but leaves a ``Theta(p^3)`` dense solve on every coefficient
@@ -148,8 +148,8 @@ def main() -> None:
         "\nThe isolated table shows the algorithmic win: the dense path pays a "
         "Theta(p^3) solve on every read while the rank-1 path pays Theta(p^2), so "
         "the speedup grows ~linearly in p. The end-to-end streaming tables fold in "
-        "per-row Python/validation overhead common to both paths, so the win there "
-        "only emerges once p is large enough for the solve to dominate that overhead."
+        "public API and validation overhead, while the recursive matrix work runs "
+        "in one fused native transition."
     )
 
 

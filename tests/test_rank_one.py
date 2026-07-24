@@ -1,4 +1,4 @@
-"""Tests for the Sherman-Morrison rank-1 inverse-maintenance prototype.
+"""Tests for native Sherman-Morrison rank-1 inverse maintenance.
 
 The dense estimators in :mod:`sufficient_regression.ols` are the reference: the
 rank-1 estimators must reproduce their coefficients, covariance, and loud-failure
@@ -92,6 +92,92 @@ def test_inverse_built_midstream_then_maintained():
         dense.push(X[i], y[i])
         fast.push(X[i], y[i])
     np.testing.assert_allclose(fast.params_, dense.params_, atol=1e-8, rtol=1e-8)
+
+
+def test_append_batch_after_inverse_build_uses_native_direct_beta_update():
+    X, y = make_data(n=280, p=7, seed=313)
+    weights = np.linspace(0.2, 2.0, X.shape[0])
+    dense = IncrementalOLS(ridge=1e-5).fit(
+        X[:80],
+        y[:80],
+        sample_weight=weights[:80],
+    )
+    fast = RankOneIncrementalOLS(ridge=1e-5).fit(
+        X[:80],
+        y[:80],
+        sample_weight=weights[:80],
+    )
+    _ = fast.params_
+
+    dense.partial_fit(X[80:], y[80:], sample_weight=weights[80:])
+    fast.partial_fit(X[80:], y[80:], sample_weight=weights[80:])
+
+    assert not fast._dirty
+    np.testing.assert_allclose(fast.params_, dense.params_, atol=1e-9, rtol=1e-9)
+    np.testing.assert_allclose(fast.xtx_, dense.xtx_, atol=1e-10, rtol=1e-10)
+    np.testing.assert_allclose(fast.xty_, dense.xty_, atol=1e-10, rtol=1e-10)
+
+
+def test_wide_blas_transition_matches_direct_solve_for_append_and_rolling():
+    rng = np.random.default_rng(317)
+    n, p, window = 330, 256, 300
+    X = rng.normal(size=(n, p))
+    y = rng.normal(size=n)
+    ridge = 1e-3
+
+    incremental = RankOneIncrementalOLS(
+        fit_intercept=False,
+        ridge=ridge,
+    ).fit(X[:window], y[:window])
+    _ = incremental.params_
+    incremental.partial_fit(X[window:], y[window:])
+    expected_append = np.linalg.solve(
+        X.T @ X + ridge * np.eye(p),
+        X.T @ y,
+    )
+    np.testing.assert_allclose(
+        incremental.params_,
+        expected_append,
+        atol=1e-9,
+        rtol=1e-9,
+    )
+
+    rolling = RankOneRollingOLS(
+        window=window,
+        fit_intercept=False,
+        ridge=ridge,
+        recompute_every=10_000,
+    ).fit(X[:window], y[:window])
+    _ = rolling.params_
+    rolling.partial_fit(X[window:], y[window:])
+    X_window = X[-window:]
+    y_window = y[-window:]
+    expected_rolling = np.linalg.solve(
+        X_window.T @ X_window + ridge * np.eye(p),
+        X_window.T @ y_window,
+    )
+    np.testing.assert_allclose(
+        rolling.params_,
+        expected_rolling,
+        atol=1e-8,
+        rtol=1e-8,
+    )
+
+
+def test_append_batch_refresh_invalidates_after_native_transition():
+    X, y = make_data(n=180, p=5, seed=323)
+    fast = RankOneIncrementalOLS(refresh_every=10).fit(X[:40], y[:40])
+    _ = fast.params_
+
+    fast.partial_fit(X[40:90], y[40:90])
+
+    assert fast._inv is None
+    np.testing.assert_allclose(
+        fast.params_,
+        IncrementalOLS().fit(X[:90], y[:90]).params_,
+        atol=1e-10,
+        rtol=1e-10,
+    )
 
 
 def test_append_hot_path_reuses_inverse_after_build(monkeypatch):
@@ -229,29 +315,58 @@ def test_rolling_weighted_stream_matches_dense():
     assert worst < 1e-8
 
 
-def test_rolling_recompute_does_not_update_stale_inverse(monkeypatch):
+def test_native_ring_buffer_preserves_wrapped_window_order():
+    X, y = make_data(n=95, p=4, seed=631)
+    weights = np.linspace(0.3, 1.7, X.shape[0])
+    window = 17
+    fast = RankOneRollingOLS(window=window, ridge=1e-5).fit(
+        X[:window],
+        y[:window],
+        sample_weight=weights[:window],
+    )
+    for index in range(window, X.shape[0]):
+        fast.push(
+            X[index],
+            y[index],
+            sample_weight=float(weights[index]),
+        )
+
+    current_X, current_y, current_weights = fast.current_window()
+    np.testing.assert_array_equal(current_X, X[-window:])
+    np.testing.assert_array_equal(current_y, y[-window:])
+    np.testing.assert_array_equal(current_weights, weights[-window:])
+    np.testing.assert_allclose(
+        fast.params_,
+        IncrementalOLS(ridge=1e-5)
+        .fit(X[-window:], y[-window:], sample_weight=weights[-window:])
+        .params_,
+        atol=1e-10,
+        rtol=1e-10,
+    )
+
+
+@pytest.mark.parametrize("bad_weight", [-1.0, np.nan, np.inf])
+def test_native_push_rejects_invalid_weight(bad_weight):
+    X, y = make_data(n=30, p=3, seed=633)
+    fast = RankOneIncrementalOLS().fit(X[:10], y[:10])
+    with pytest.raises(ValueError):
+        fast.push(X[10], y[10], sample_weight=bad_weight)
+
+
+def test_rolling_recompute_invalidates_inverse_before_exact_rebuild():
     X, y = make_data(n=120, p=4, seed=636)
     fast = RankOneRollingOLS(window=30, recompute_every=10_000)
     for i in range(45):
         fast.push(X[i], y[i])
     _ = fast.params_
-    saw_stale_inverse = False
-    original = RankOneRollingOLS._sherman_morrison
-
-    def spy_sherman_morrison(self, z, weight, sign):
-        nonlocal saw_stale_inverse
-        saw_stale_inverse = saw_stale_inverse or self._inv is not None
-        return original(self, z, weight, sign)
-
-    monkeypatch.setattr(
-        RankOneRollingOLS,
-        "_sherman_morrison",
-        spy_sherman_morrison,
-    )
-
     fast.recompute()
-    assert not saw_stale_inverse
     assert fast._inv is None
+    np.testing.assert_allclose(
+        fast.params_,
+        IncrementalOLS().fit(X[15:45], y[15:45]).params_,
+        atol=1e-10,
+        rtol=1e-10,
+    )
 
 
 def test_rolling_inverse_stays_symmetric_over_long_stream():

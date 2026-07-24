@@ -27,19 +27,19 @@ rows is exact up to floating point roundoff.
 This is not stochastic gradient descent. `partial_fit` and `push` update exact
 sufficient statistics, not approximate optimizer state.
 
-### Prototype: rank-1 inverse maintenance
+### Native rank-1 inverse maintenance
 
 - `RankOneIncrementalOLS` and `RankOneRollingOLS` additionally maintain the
   inverse of the regularized Gram matrix with Sherman-Morrison rank-1 updates
   (classical recursive least squares). Coefficients become a `Theta(p^2)`
   matrix-vector product instead of a fresh `Theta(p^3)` dense solve on every
-  read, so appending a row or sliding a window and then reading coefficients is
-  `Theta(p^2)` per step. They reproduce the dense estimators' coefficients,
-  covariance, and loud-failure behavior. `RankOneRollingOLS` rebuilds on the
-  rolling recompute cadence; `RankOneIncrementalOLS` can do the same when
-  `refresh_every` is set. See
-  [`scripts/bench_rank_one.py`](scripts/bench_rank_one.py) and the rank-1
-  section of the
+  read. Their compiled Cython kernel fuses statistics, inverse, and direct
+  coefficient updates so the arithmetic reduction also reaches wall-clock
+  performance. `RankOneRollingOLS` uses a contiguous native-friendly ring
+  buffer and vectorized refreshes. Both estimators reproduce the dense
+  estimators' coefficients, covariance, and loud-failure behavior. See
+  [`scripts/bench_production.py`](scripts/bench_production.py),
+  [`scripts/bench_rank_one.py`](scripts/bench_rank_one.py), and the rank-1 section of the
   [performance note](docs/math/sufficient_statistics_ols_performance.pdf).
 
 ## Examples
@@ -157,6 +157,31 @@ model.partial_fit(X_batch, y_batch)
 - [Correctness proof](docs/math/sufficient_statistics_ols_correctness.pdf)
 - [Performance analysis](docs/math/sufficient_statistics_ols_performance.pdf)
 
+## Measured Streaming Performance
+
+Median of five runs on Apple silicon with Python 3.14 and NumPy 2.5.1.
+Coefficients were read after every update. Append used 4,000 updates; rolling
+used 2,000 slides over a 2,000-row window.
+
+| Features | Append vs Python path | Rolling vs Python path |
+|---:|---:|---:|
+| 8 | 3.65x | 5.46x |
+| 32 | 4.94x | 6.62x |
+| 128 | 3.78x | 4.18x |
+| 256 | 1.92x | 1.91x |
+
+For eight-feature rolling regression, the native estimator is 1.76x faster
+than a full vectorized normal-equation refit at a 1,000-row window, 6.44x at
+10,000 rows, and 46.31x at 100,000 rows. Reproduce the machine-readable
+benchmark with:
+
+```bash
+source .venv/bin/activate
+python scripts/bench_production.py \
+  --label native \
+  --output benchmark.json
+```
+
 ## Development
 
 Bootstrap a fresh workspace with a local virtual environment and editable dev
@@ -172,6 +197,15 @@ Run tests with:
 ./scripts/test.sh
 ```
 
+Build wheel and source distributions with:
+
+```bash
+source .venv/bin/activate
+python -m build
+```
+
 The scripts create `.venv` when it is absent, then activate it before running
-Python. The `.venv` directory is intentionally gitignored and should not be
-committed.
+Python. Editable/source installs compile the required native Cython extension;
+release wheels are built and tested on Linux, macOS, and Windows by
+`build-wheels.yml`. The `.venv` directory is intentionally gitignored and
+should not be committed.

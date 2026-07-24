@@ -1,5 +1,17 @@
 # Fixed Bugs
 
+## 2026-07-24
+
+- Replaced fragmented Python/NumPy rank-one streaming transitions with a fused
+  compiled kernel that maintains sufficient statistics, inverse state, and
+  coefficients together.
+- Replaced the rolling estimator's deque of per-row arrays with contiguous ring
+  storage and vectorized numerical refreshes.
+- Added the missing distribution-build dependency and cross-platform native
+  wheel build/test automation.
+- Included the native Cython source in source distributions and added an
+  install check for the built archive.
+
 ## 2026-07-01
 
 - Invalidated `RankOneRollingOLS`'s maintained inverse before recomputing
