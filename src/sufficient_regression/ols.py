@@ -183,6 +183,27 @@ def _regularization_matrix(
     return np.diag(ridge * diagonal)
 
 
+def _require_full_rank_unregularized(
+    xtx: np.ndarray,
+    *,
+    n_params: int,
+    ridge: float,
+) -> None:
+    """Fail explicitly when an unregularized normal system is rank deficient.
+
+    ``np.linalg.solve`` is not a portable singularity detector: some LAPACK
+    builds return an unstable value for exactly dependent columns. A cold solve
+    is already cubic, so an explicit rank check preserves loud failure semantics
+    without changing the hot recursive-update complexity.
+    """
+
+    if ridge == 0 and np.linalg.matrix_rank(xtx) != n_params:
+        raise SingularRegressionError(
+            "The regression system is singular. Add more independent rows, "
+            "remove collinear features, or use ridge > 0."
+        )
+
+
 def _rank_one_cholesky_update(lower: np.ndarray, update: np.ndarray) -> np.ndarray:
     """Return the Cholesky factor for ``lower @ lower.T + update update.T``."""
 
@@ -366,6 +387,11 @@ class _SufficientOLSBase:
         self._require_stats()
         if self.weight_sum_ <= 0:
             raise SingularRegressionError("Cannot solve with zero total sample weight.")
+        _require_full_rank_unregularized(
+            self._xtx,
+            n_params=self.n_params_,
+            ridge=self.ridge,
+        )
         system = self._regularized_system()
         try:
             return np.linalg.solve(system, self._xty)

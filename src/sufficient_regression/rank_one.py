@@ -67,6 +67,7 @@ from .ols import (
     _as_single_value,
     _as_single_weight,
     _regularization_matrix,
+    _require_full_rank_unregularized,
     _validate_positive_integer,
     _weighted_stats,
 )
@@ -188,6 +189,11 @@ class _RecursiveInverseMixin:
         """Return ``M``, building it from XtX with a dense inverse if needed."""
 
         if self._inv is None:
+            _require_full_rank_unregularized(
+                self._xtx,
+                n_params=self.n_params_,
+                ridge=self.ridge,
+            )
             self._inv = _invert_regularized_gram(self._regularized_gram())
             # The solve can differ by a few ulps across triangles. The native
             # kernel preserves exact symmetry after this one-time projection.

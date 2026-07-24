@@ -18,6 +18,9 @@ No open bugs are currently known.
 - Fixed: the first Windows wheel matrix attempted unsupported 32-bit CPython
   builds, where the scientific test dependencies do not publish compatible
   wheels. Windows production artifacts are now explicitly AMD64.
+- Fixed: Windows LAPACK could return an unstable value instead of raising for
+  an exactly rank-deficient unregularized system. Cold unregularized solves now
+  perform an explicit rank check, making loud singular failure cross-platform.
 - Fixed: `RankOneRollingOLS.recompute()` invalidated the maintained inverse only
   after replaying buffered rows, so recompute could apply Sherman-Morrison
   updates to a stale inverse before discarding it. It now invalidates before

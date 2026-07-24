@@ -419,8 +419,8 @@ def test_not_fitted_raises():
         _ = RankOneIncrementalOLS().params_
 
 
-def test_exactly_singular_raises_loudly():
-    """A duplicated feature column makes XtX exactly singular; the solve must fail."""
+def test_exactly_singular_raises_loudly_even_when_lapack_does_not(monkeypatch):
+    """Rank detection must not depend on platform-specific solve behavior."""
 
     rng = np.random.default_rng(909)
     n = 150
@@ -428,6 +428,11 @@ def test_exactly_singular_raises_loudly():
     X = np.column_stack([a, a, rng.normal(size=n)])  # column 0 == column 1
     y = rng.normal(size=n)
     fast = RankOneIncrementalOLS(fit_intercept=True).fit(X, y)
+    monkeypatch.setattr(
+        np.linalg,
+        "solve",
+        lambda matrix, rhs: np.zeros_like(rhs, dtype=float),
+    )
     with pytest.raises(SingularRegressionError):
         _ = fast.params_
 

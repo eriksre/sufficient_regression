@@ -13,6 +13,8 @@
   install check for the built archive.
 - Restricted Windows wheel builds to AMD64 after the 32-bit test environment
   failed to resolve supported scientific reference dependencies.
+- Made unregularized singularity detection explicit instead of relying on
+  platform-specific `np.linalg.solve` failure behavior.
 
 ## 2026-07-01
 
