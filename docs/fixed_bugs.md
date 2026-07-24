@@ -11,6 +11,8 @@
   wheel build/test automation.
 - Included the native Cython source in source distributions and added an
   install check for the built archive.
+- Restricted Windows wheel builds to AMD64 after the 32-bit test environment
+  failed to resolve supported scientific reference dependencies.
 
 ## 2026-07-01
 

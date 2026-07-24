@@ -15,6 +15,9 @@ No open bugs are currently known.
 - Fixed: the first native source distribution omitted `_native.pyx`, so an
   installation from that archive could not compile the required extension. The
   Cython source is now explicitly included and the built archive is install-tested.
+- Fixed: the first Windows wheel matrix attempted unsupported 32-bit CPython
+  builds, where the scientific test dependencies do not publish compatible
+  wheels. Windows production artifacts are now explicitly AMD64.
 - Fixed: `RankOneRollingOLS.recompute()` invalidated the maintained inverse only
   after replaying buffered rows, so recompute could apply Sherman-Morrison
   updates to a stale inverse before discarding it. It now invalidates before

@@ -50,3 +50,7 @@ test-requires = [
 
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.windows]
+# The scientific reference dependencies do not publish 32-bit Windows wheels.
+archs = ["AMD64"]
