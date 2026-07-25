@@ -166,15 +166,24 @@ cdef inline void _symmetric_rank_two(
     double new_scale,
     Py_ssize_t p,
 ) noexcept nogil:
-    """Fuse the rolling inverse downdate/update into one symmetric write."""
+    """Fuse the rolling inverse downdate/update into one symmetric write.
+
+    As in :func:`_symmetric_rank_one`, symmetry is a state invariant rather than
+    something to re-establish per element: the freshly built inverse is projected
+    to exact symmetry and every update writes both triangles from one computed
+    value, so averaging the triangles here would be a no-op in the hot loop.
+    """
 
     cdef Py_ssize_t i, j
-    cdef double value
+    cdef double old_row_scale, new_row_scale, value
     for i in range(p):
+        # Hoisted out of the inner loop; multiplication associates left to right
+        # so the products are bitwise identical to the unhoisted form.
+        old_row_scale = old_scale * old_direction[i]
+        new_row_scale = new_scale * new_direction[i]
         for j in range(i + 1):
-            value = 0.5 * (matrix[i, j] + matrix[j, i])
-            value += old_scale * old_direction[i] * old_direction[j]
-            value -= new_scale * new_direction[i] * new_direction[j]
+            value = matrix[i, j] + old_row_scale * old_direction[j]
+            value -= new_row_scale * new_direction[j]
             matrix[i, j] = value
             matrix[j, i] = value
 
@@ -295,11 +304,13 @@ def append_update_one(
     cdef Py_ssize_t p = row.shape[0]
     cdef Py_ssize_t i
     cdef double denominator, residual, scale, projection
-    cdef double* work
+    cdef double work_storage[NATIVE_STACK_MAX_PARAMS]
     cdef double[::1] work_view
     cdef bint valid = True
     cdef int status
 
+    if p > NATIVE_STACK_MAX_PARAMS:
+        raise ValueError("native stack kernel supports at most 256 parameters.")
     if xtx.shape[0] != p or xtx.shape[1] != p:
         raise ValueError("xtx shape must match the row width.")
     if inverse.shape[0] != p or inverse.shape[1] != p:
@@ -310,33 +321,27 @@ def append_update_one(
     if status != _VALID_OK:
         _raise_streaming_validation(status)
 
-    work = <double*>malloc(p * sizeof(double))
-    if work == NULL:
-        raise MemoryError("Could not allocate native rank-one update workspace.")
-    work_view = <double[:p]>work
-    try:
-        with nogil:
-            _stats_rank_one(xtx, xty, row, target, weight, 1.0, p)
-            if weight != 0.0:
-                _matrix_vector(inverse, row, work, p)
-                projection = 0.0
-                residual = target
+    work_view = <double[:p]>&work_storage[0]
+    with nogil:
+        _stats_rank_one(xtx, xty, row, target, weight, 1.0, p)
+        if weight != 0.0:
+            _matrix_vector(inverse, row, &work_storage[0], p)
+            projection = 0.0
+            residual = target
+            for i in range(p):
+                projection += row[i] * work_storage[i]
+                residual -= row[i] * beta[i]
+            denominator = 1.0 + weight * projection
+            if (
+                not isfinite(denominator)
+                or denominator <= min_denominator
+            ):
+                valid = False
+            else:
+                scale = weight / denominator
                 for i in range(p):
-                    projection += row[i] * work[i]
-                    residual -= row[i] * beta[i]
-                denominator = 1.0 + weight * projection
-                if (
-                    not isfinite(denominator)
-                    or denominator <= min_denominator
-                ):
-                    valid = False
-                else:
-                    scale = weight / denominator
-                    for i in range(p):
-                        beta[i] += scale * work[i] * residual
-                    _symmetric_rank_one(inverse, work_view, -scale, p)
-    finally:
-        free(work)
+                    beta[i] += scale * work_storage[i] * residual
+                _symmetric_rank_one(inverse, work_view, -scale, p)
 
     return valid, 1 if (valid and weight != 0.0) else 0
 
