@@ -10,6 +10,7 @@ extra Sherman-Morrison roundoff and are checked at a looser-but-tight tolerance.
 import numpy as np
 import pytest
 
+from sufficient_regression import _native
 from sufficient_regression import (
     IncrementalOLS,
     NotFittedError,
@@ -162,6 +163,97 @@ def test_wide_blas_transition_matches_direct_solve_for_append_and_rolling():
         atol=1e-8,
         rtol=1e-8,
     )
+
+
+@pytest.mark.parametrize("p", [3, 31, 255])
+def test_fused_native_rolling_matches_sequential_rank_one_equations(p):
+    """The one-pass kernel must preserve the prior remove-then-add equations."""
+
+    rng = np.random.default_rng(318 + p)
+    base = rng.normal(size=(2 * p + 20, p))
+    initial_xtx = base.T @ base + 100.0 * np.eye(p)
+    initial_xty = rng.normal(size=p)
+    initial_inverse = np.linalg.solve(initial_xtx, np.eye(p))
+    initial_inverse = 0.5 * (initial_inverse + initial_inverse.T)
+    initial_beta = initial_inverse @ initial_xty
+    old_row = np.ascontiguousarray(rng.normal(size=p))
+    new_row = np.ascontiguousarray(rng.normal(size=p))
+    old_target = float(rng.normal())
+    new_target = float(rng.normal())
+
+    for old_weight, new_weight in ((0.0, 1.3), (1.1, 0.0), (0.7, 1.2)):
+        expected_xtx = initial_xtx.copy()
+        expected_xty = initial_xty.copy()
+        expected_inverse = initial_inverse.copy()
+        expected_beta = initial_beta.copy()
+
+        expected_xtx -= old_weight * np.outer(old_row, old_row)
+        expected_xty -= old_weight * old_row * old_target
+        expected_xtx += new_weight * np.outer(new_row, new_row)
+        expected_xty += new_weight * new_row * new_target
+
+        if old_weight != 0.0:
+            direction = expected_inverse @ old_row
+            denominator = 1.0 - old_weight * float(old_row @ direction)
+            assert denominator > 1e-10
+            residual = old_target - float(old_row @ expected_beta)
+            scale = old_weight / denominator
+            expected_beta -= scale * direction * residual
+            expected_inverse += scale * np.outer(direction, direction)
+
+        if new_weight != 0.0:
+            direction = expected_inverse @ new_row
+            denominator = 1.0 + new_weight * float(new_row @ direction)
+            assert denominator > 1e-10
+            residual = new_target - float(new_row @ expected_beta)
+            scale = new_weight / denominator
+            expected_beta += scale * direction * residual
+            expected_inverse -= scale * np.outer(direction, direction)
+
+        actual_xtx = np.ascontiguousarray(initial_xtx.copy())
+        actual_xty = np.ascontiguousarray(initial_xty.copy())
+        actual_inverse = np.ascontiguousarray(initial_inverse.copy())
+        actual_beta = np.ascontiguousarray(initial_beta.copy())
+        valid = _native.rolling_update(
+            actual_xtx,
+            actual_xty,
+            actual_inverse,
+            actual_beta,
+            old_row,
+            old_target,
+            old_weight,
+            new_row,
+            new_target,
+            new_weight,
+            1e-10,
+        )
+
+        assert valid
+        np.testing.assert_allclose(
+            actual_xtx,
+            expected_xtx,
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            actual_xty,
+            expected_xty,
+            atol=1e-13,
+            rtol=1e-13,
+        )
+        np.testing.assert_allclose(
+            actual_inverse,
+            expected_inverse,
+            atol=1e-13,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            actual_beta,
+            expected_beta,
+            atol=1e-13,
+            rtol=1e-12,
+        )
+        np.testing.assert_array_equal(actual_inverse, actual_inverse.T)
 
 
 def test_append_batch_refresh_invalidates_after_native_transition():

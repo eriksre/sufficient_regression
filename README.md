@@ -36,8 +36,9 @@ sufficient statistics, not approximate optimizer state.
   read. Their compiled Cython kernel fuses statistics, inverse, and direct
   coefficient updates so the arithmetic reduction also reaches wall-clock
   performance. `RankOneRollingOLS` uses a contiguous native-friendly ring
-  buffer and vectorized refreshes. Both estimators reproduce the dense
-  estimators' coefficients, covariance, and loud-failure behavior. See
+  buffer, fuses each outgoing/incoming row pair into one inverse traversal,
+  and uses vectorized refreshes. Both estimators reproduce the dense estimators'
+  coefficients, covariance, and loud-failure behavior. See
   [`scripts/bench_production.py`](scripts/bench_production.py),
   [`scripts/bench_rank_one.py`](scripts/bench_rank_one.py), and the rank-1 section of the
   [performance note](docs/math/sufficient_statistics_ols_performance.pdf).
@@ -165,14 +166,14 @@ used 2,000 slides over a 2,000-row window.
 
 | Features | Append vs Python path | Rolling vs Python path |
 |---:|---:|---:|
-| 8 | 3.65x | 5.46x |
-| 32 | 4.94x | 6.62x |
-| 128 | 3.78x | 4.18x |
-| 256 | 1.92x | 1.91x |
+| 8 | 3.76x | 5.30x |
+| 32 | 4.98x | 6.73x |
+| 128 | 4.22x | 5.34x |
+| 256 | 1.91x | 1.85x |
 
-For eight-feature rolling regression, the native estimator is 1.76x faster
-than a full vectorized normal-equation refit at a 1,000-row window, 6.44x at
-10,000 rows, and 46.31x at 100,000 rows. Reproduce the machine-readable
+For eight-feature rolling regression, the native estimator is 1.72x faster
+than a full vectorized normal-equation refit at a 1,000-row window, 6.16x at
+10,000 rows, and 44.68x at 100,000 rows. Reproduce the machine-readable
 benchmark with:
 
 ```bash
