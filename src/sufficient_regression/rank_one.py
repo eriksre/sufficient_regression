@@ -103,30 +103,61 @@ def _scalar_weight(sample_weight: float | None) -> float:
     return weight
 
 
-def _prepared_augmented_row(
+def _stage_streaming_row(
     model: _SufficientOLSBase,
     x,
     y: float,
     sample_weight: float | None,
 ) -> tuple[np.ndarray, float, float]:
-    """Validate one public ``push`` input and construct its native row once."""
+    """Stage one public ``push`` input in the estimator's reusable row buffer.
 
-    X_row = _as_single_row(x, name="x")
-    y_value = float(_as_single_value(y, name="y")[0])
-    weight = _scalar_weight(sample_weight)
+    Shape mismatches and bad weights raise here. Finiteness of the feature row
+    and the target is checked inside the native kernel instead, which already
+    loads every element on its way through: the NumPy ``isfinite`` scan this
+    replaces cost more per row than the update arithmetic it guarded. Wide
+    systems skip the kernel, so they are validated explicitly below.
+
+    The returned row is owned by the estimator and is overwritten by the next
+    push. Every consumer either feeds it straight to an update or copies it into
+    the rolling ring buffer, so no caller retains it.
+    """
+
     if model.n_features_in_ is None:
         raise RuntimeError("Single-row native preparation requires fitted state.")
-    if X_row.shape[1] != model.n_features_in_:
+
+    features = x if type(x) is np.ndarray else np.asarray(x, dtype=float)
+    if features.ndim == 2 and features.shape[0] == 1:
+        features = features[0]
+    elif features.ndim != 1:
+        raise ValueError("x must be one row.")
+    if features.shape[0] != model.n_features_in_:
         raise ValueError(
             "X has a different number of features than the fitted state; "
-            f"expected {model.n_features_in_}, got {X_row.shape[1]}."
+            f"expected {model.n_features_in_}, got {features.shape[0]}."
         )
+
+    row = model._push_scratch
+    if row is None:
+        row = np.zeros(model.n_params_, dtype=float)
+        if model.fit_intercept:
+            # The intercept column is constant, so it is written once at
+            # allocation rather than on every push.
+            row[0] = 1.0
+        model._push_scratch = row
     if model.fit_intercept:
-        row = np.empty(model.n_params_, dtype=float)
-        row[0] = 1.0
-        row[1:] = X_row[0]
+        row[1:] = features
     else:
-        row = np.ascontiguousarray(X_row[0], dtype=float)
+        row[:] = features
+
+    y_type = type(y)
+    if y_type is float or y_type is np.float64:
+        y_value = float(y)
+    else:
+        y_value = float(_as_single_value(y, name="y")[0])
+    weight = _scalar_weight(sample_weight)
+
+    if model.n_params_ >= _BLAS_TRANSITION_MIN_PARAMS:
+        _native.validate_streaming_row(row, y_value)
     return row, y_value, weight
 
 
@@ -176,6 +207,9 @@ class _RecursiveInverseMixin:
         # exact), so the eventual rebuild is still correct.
         self._inv: np.ndarray | None = None
         self._inv_updates: int = 0
+        # Reusable augmented row for ``push``, sized on first use. Reallocated
+        # implicitly on refit because ``fit`` resets state.
+        self._push_scratch: np.ndarray | None = None
 
     def _regularized_gram(self) -> np.ndarray:
         return self._xtx + _regularization_matrix(
@@ -412,7 +446,7 @@ class RankOneIncrementalOLS(_RecursiveInverseMixin, _SufficientOLSBase):
                 _as_single_value(y, name="y"),
                 sample_weight=_as_single_weight(sample_weight),
             )
-        row, y_value, weight = _prepared_augmented_row(
+        row, y_value, weight = _stage_streaming_row(
             self,
             x,
             y,
@@ -440,17 +474,14 @@ class RankOneIncrementalOLS(_RecursiveInverseMixin, _SufficientOLSBase):
             )
             inverse_updates = int(weight != 0.0 and inverse_valid)
         else:
-            row_batch = row.reshape(1, -1)
-            target = np.asarray([y_value], dtype=float)
-            weights = np.asarray([weight], dtype=float)
-            _, inverse_valid, inverse_updates = _native.append_update(
+            inverse_valid, inverse_updates = _native.append_update_one(
                 self._xtx,
                 self._xty,
                 self._inv,
                 self._params_cache,
-                row_batch,
-                target,
-                weights,
+                row,
+                y_value,
+                weight,
                 _SHERMAN_MORRISON_MIN_DENOM,
             )
         self._yty += weight * y_value * y_value
@@ -580,7 +611,7 @@ class RankOneRollingOLS(_RecursiveInverseMixin, RollingOLS):
                 _as_single_value(y, name="y"),
                 sample_weight=_as_single_weight(sample_weight),
             )
-        row, y_value, weight = _prepared_augmented_row(
+        row, y_value, weight = _stage_streaming_row(
             self,
             x,
             y,
@@ -630,14 +661,14 @@ class RankOneRollingOLS(_RecursiveInverseMixin, RollingOLS):
                     )
                     inverse_updates = int(weight != 0.0 and inverse_valid)
                 else:
-                    _, inverse_valid, inverse_updates = _native.append_update(
+                    inverse_valid, inverse_updates = _native.append_update_one(
                         self._xtx,
                         self._xty,
                         self._inv,
                         self._params_cache,
-                        row.reshape(1, -1),
-                        np.asarray([y_value], dtype=float),
-                        np.asarray([weight], dtype=float),
+                        row,
+                        y_value,
+                        weight,
                         _SHERMAN_MORRISON_MIN_DENOM,
                     )
                 self._inv_updates += int(inverse_updates)

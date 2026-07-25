@@ -1,5 +1,24 @@
 # Fixed Bugs
 
+## 2026-07-25
+
+- Moved streaming-row finiteness validation out of the Python push path and into
+  the native kernel, which already loads every element. The two NumPy
+  `isfinite` scans it replaced cost more per row than the update arithmetic
+  itself. Validation runs before any mutation, so a rejected row leaves state
+  untouched.
+- Replaced the per-push augmented row allocation with a reusable per-estimator
+  buffer whose constant intercept entry is written once, and added a scalar
+  `append_update_one` kernel entry point so the single-row append path no longer
+  reshapes the row and allocates two length-one arrays per call.
+- Removed the redundant per-element triangle averaging from
+  `_symmetric_rank_one`; symmetry is established when the inverse is built and
+  preserved because every update writes both triangles from one value.
+- Added streaming validation coverage: non-finite features and targets on both
+  estimators, state preservation after a rejected push, the wide NumPy/BLAS
+  path's explicit validation, ring-buffer independence from the reused push
+  buffer, and non-canonical row input forms.
+
 ## 2026-07-24
 
 - Replaced fragmented Python/NumPy rank-one streaming transitions with a fused

@@ -592,3 +592,113 @@ def test_zero_total_weight_raises_loudly():
     fast = RankOneIncrementalOLS().fit(X, y, sample_weight=np.zeros(X.shape[0]))
     with pytest.raises(SingularRegressionError):
         _ = fast.params_
+
+
+# --------------------------------------------------------------------------- #
+# Streaming row validation, which the native kernel performs on the way        #
+# through rather than with a NumPy scan in the push path                       #
+# --------------------------------------------------------------------------- #
+
+
+def _streaming_models(window):
+    X, y = make_data(n=60, p=4, seed=4242)
+    return [
+        (RankOneIncrementalOLS().fit(X[:20], y[:20]), X, y),
+        (RankOneRollingOLS(window=window).fit(X[:20], y[:20]), X, y),
+    ]
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_native_push_rejects_non_finite_features(bad_value):
+    for model, X, y in _streaming_models(window=15):
+        bad_row = X[20].copy()
+        bad_row[2] = bad_value
+        with pytest.raises(ValueError, match="x must contain only finite values"):
+            model.push(bad_row, y[20])
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_native_push_rejects_non_finite_target(bad_value):
+    for model, X, y in _streaming_models(window=15):
+        with pytest.raises(ValueError, match="y must contain only finite values"):
+            model.push(X[20], bad_value)
+
+
+def test_rejected_push_leaves_state_untouched():
+    """A rejected row must not leave partially updated statistics behind."""
+
+    for model, X, y in _streaming_models(window=15):
+        _ = model.params_
+        before_params = model.params_.copy()
+        before_xtx = model.xtx_.copy()
+        before_xty = model.xty_.copy()
+        before_rows = model.n_observations_
+        bad_row = X[20].copy()
+        bad_row[0] = np.nan
+        for bad_args in ((bad_row, y[20]), (X[20], np.nan)):
+            with pytest.raises(ValueError):
+                model.push(*bad_args)
+        np.testing.assert_array_equal(model.xtx_, before_xtx)
+        np.testing.assert_array_equal(model.xty_, before_xty)
+        np.testing.assert_array_equal(model.params_, before_params)
+        assert model.n_observations_ == before_rows
+
+
+def test_wide_blas_push_still_validates_non_finite_rows():
+    """The wide path skips the kernel, so it validates the row explicitly."""
+
+    n_features = 260
+    X, y = make_data(n=700, p=n_features, seed=515)
+    fast = RankOneIncrementalOLS(fit_intercept=False, ridge=1e-9).fit(
+        X[:600], y[:600]
+    )
+    _ = fast.params_
+    bad_row = X[600].copy()
+    bad_row[7] = np.nan
+    with pytest.raises(ValueError, match="x must contain only finite values"):
+        fast.push(bad_row, y[600])
+
+
+def test_push_scratch_reuse_does_not_alias_rolling_window():
+    """``push`` stages rows in a reused buffer; the ring buffer must copy them."""
+
+    X, y = make_data(n=400, p=3, seed=717)
+    window = 40
+    fast = RankOneRollingOLS(window=window).fit(X[:window], y[:window])
+    _ = fast.params_
+    for index in range(window, X.shape[0]):
+        fast.push(X[index], y[index])
+        _ = fast.params_
+    rows, targets, weights = fast.current_window()
+    np.testing.assert_allclose(rows, X[-window:], rtol=0, atol=0)
+    np.testing.assert_allclose(targets, y[-window:], rtol=0, atol=0)
+    np.testing.assert_allclose(weights, np.ones(window), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "row_factory",
+    [
+        lambda row: list(row),
+        lambda row: row.reshape(1, -1),
+        lambda row: row.astype(np.float32),
+        lambda row: [int(value) for value in np.round(row)],
+    ],
+)
+def test_push_accepts_non_canonical_row_forms(row_factory):
+    X, y = make_data(n=80, p=4, seed=818)
+    fast = RankOneIncrementalOLS().fit(X[:30], y[:30])
+    dense = IncrementalOLS().fit(X[:30], y[:30])
+    _ = fast.params_
+    for index in range(30, 40):
+        fast.push(row_factory(X[index]), float(y[index]))
+        dense.push(row_factory(X[index]), float(y[index]))
+    np.testing.assert_allclose(fast.params_, dense.params_, rtol=1e-10)
+
+
+def test_push_rejects_wrong_width_and_multi_row_input():
+    X, y = make_data(n=40, p=4, seed=919)
+    fast = RankOneIncrementalOLS().fit(X[:20], y[:20])
+    with pytest.raises(ValueError, match="different number of features"):
+        fast.push(np.ones(7), 1.0)
+    with pytest.raises(ValueError, match="must be one row"):
+        fast.push(X[20:23], 1.0)

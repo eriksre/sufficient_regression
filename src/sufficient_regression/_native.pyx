@@ -9,24 +9,63 @@ from libc.math cimport isfinite
 DEF NATIVE_STACK_MAX_PARAMS = 256
 
 
+# Streaming rows are checked for finiteness here rather than with a NumPy
+# ``isfinite`` scan in the Python push path. The kernel already loads every
+# element of the row, so the check is effectively free, whereas the NumPy scan
+# it replaces cost more per row than the update arithmetic itself. Validation
+# always runs before any state is mutated, so a rejected row leaves the
+# estimator exactly as it was.
+cdef enum:
+    _VALID_OK = 0
+    _VALID_ROW = 1
+    _VALID_TARGET = 2
+
+
+cdef inline int _validate_streaming_row(
+    const double[::1] row,
+    double target,
+    Py_ssize_t p,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    if not isfinite(target):
+        return _VALID_TARGET
+    for i in range(p):
+        if not isfinite(row[i]):
+            return _VALID_ROW
+    return _VALID_OK
+
+
+cdef _raise_streaming_validation(int status):
+    """Raise the same errors the NumPy validation path raised."""
+
+    if status == _VALID_ROW:
+        raise ValueError("x must contain only finite values.")
+    if status == _VALID_TARGET:
+        raise ValueError("y must contain only finite values.")
+    raise AssertionError("Unknown streaming validation status.")
+
+
 cdef inline void _symmetric_rank_one(
     double[:, ::1] matrix,
     const double[::1] vector,
     double scale,
     Py_ssize_t p,
 ) noexcept nogil:
-    """Apply ``matrix += scale * vector vector.T`` and preserve exact symmetry."""
+    """Apply ``matrix += scale * vector vector.T``, preserving exact symmetry.
+
+    The matrix is symmetric on entry as a state invariant: ``_ensure_inverse``
+    projects the freshly built inverse to exact symmetry, and every update writes
+    both triangles from a single computed value. Re-averaging the two triangles
+    per element would therefore be a no-op costing an extra load, add and
+    multiply in the innermost loop of the hot path.
+    """
 
     cdef Py_ssize_t i, j
-    cdef double value
+    cdef double row_scale, value
     for i in range(p):
+        row_scale = scale * vector[i]
         for j in range(i + 1):
-            # Averaging also removes asymmetry introduced by the initial dense
-            # solve. Writing both triangles makes symmetry a state invariant.
-            value = (
-                0.5 * (matrix[i, j] + matrix[j, i])
-                + scale * vector[i] * vector[j]
-            )
+            value = matrix[i, j] + row_scale * vector[j]
             matrix[i, j] = value
             matrix[j, i] = value
 
@@ -42,12 +81,15 @@ cdef inline void _stats_rank_one(
 ) noexcept nogil:
     cdef Py_ssize_t i, j
     cdef double signed_weight = sign * weight
-    cdef double value
+    cdef double row_scale, value
 
     for i in range(p):
-        xty[i] += signed_weight * row[i] * target
+        # Hoisted out of the inner loop; multiplication associates left to right
+        # so the products are bitwise identical to the unhoisted form.
+        row_scale = signed_weight * row[i]
+        xty[i] += row_scale * target
         for j in range(i + 1):
-            value = xtx[i, j] + signed_weight * row[i] * row[j]
+            value = xtx[i, j] + row_scale * row[j]
             xtx[i, j] = value
             xtx[j, i] = value
 
@@ -220,6 +262,85 @@ def append_update(
     return processed, valid, inverse_updates
 
 
+def validate_streaming_row(const double[::1] row, double target):
+    """Check one streaming row for finiteness, raising as the kernel would.
+
+    Wide systems take the NumPy/BLAS update path, which never enters a kernel
+    where the row would otherwise be validated on the way through.
+    """
+
+    cdef int status = _validate_streaming_row(row, target, row.shape[0])
+    if status != _VALID_OK:
+        _raise_streaming_validation(status)
+
+
+def append_update_one(
+    double[:, ::1] xtx,
+    double[::1] xty,
+    double[:, ::1] inverse,
+    double[::1] beta,
+    const double[::1] row,
+    double target,
+    double weight,
+    double min_denominator,
+):
+    """Fuse one appended row's statistics, inverse, and coefficient update.
+
+    Returns ``(inverse_valid, inverse_updates)``. This exists alongside
+    :func:`append_update` because the single-row streaming path would otherwise
+    have to reshape the row and allocate length-one target and weight arrays on
+    every push purely to satisfy a batch signature.
+    """
+
+    cdef Py_ssize_t p = row.shape[0]
+    cdef Py_ssize_t i
+    cdef double denominator, residual, scale, projection
+    cdef double* work
+    cdef double[::1] work_view
+    cdef bint valid = True
+    cdef int status
+
+    if xtx.shape[0] != p or xtx.shape[1] != p:
+        raise ValueError("xtx shape must match the row width.")
+    if inverse.shape[0] != p or inverse.shape[1] != p:
+        raise ValueError("inverse shape must match the row width.")
+    if xty.shape[0] != p or beta.shape[0] != p:
+        raise ValueError("vector state shape must match the row width.")
+    status = _validate_streaming_row(row, target, p)
+    if status != _VALID_OK:
+        _raise_streaming_validation(status)
+
+    work = <double*>malloc(p * sizeof(double))
+    if work == NULL:
+        raise MemoryError("Could not allocate native rank-one update workspace.")
+    work_view = <double[:p]>work
+    try:
+        with nogil:
+            _stats_rank_one(xtx, xty, row, target, weight, 1.0, p)
+            if weight != 0.0:
+                _matrix_vector(inverse, row, work, p)
+                projection = 0.0
+                residual = target
+                for i in range(p):
+                    projection += row[i] * work[i]
+                    residual -= row[i] * beta[i]
+                denominator = 1.0 + weight * projection
+                if (
+                    not isfinite(denominator)
+                    or denominator <= min_denominator
+                ):
+                    valid = False
+                else:
+                    scale = weight / denominator
+                    for i in range(p):
+                        beta[i] += scale * work[i] * residual
+                    _symmetric_rank_one(inverse, work_view, -scale, p)
+    finally:
+        free(work)
+
+    return valid, 1 if (valid and weight != 0.0) else 0
+
+
 def stats_add(
     double[:, ::1] xtx,
     double[::1] xty,
@@ -230,8 +351,12 @@ def stats_add(
     """Add one row to sufficient statistics without an initialized inverse."""
 
     cdef Py_ssize_t p = row.shape[0]
+    cdef int status
     if xtx.shape[0] != p or xtx.shape[1] != p or xty.shape[0] != p:
         raise ValueError("statistics shape must match the row width.")
+    status = _validate_streaming_row(row, target, p)
+    if status != _VALID_OK:
+        _raise_streaming_validation(status)
     with nogil:
         _stats_rank_one(xtx, xty, row, target, weight, 1.0, p)
 
@@ -249,10 +374,16 @@ def stats_slide(
     """Apply one rolling remove/add pair to sufficient statistics."""
 
     cdef Py_ssize_t p = new_row.shape[0]
+    cdef int status
     if old_row.shape[0] != p:
         raise ValueError("old and new rows must have the same width.")
     if xtx.shape[0] != p or xtx.shape[1] != p or xty.shape[0] != p:
         raise ValueError("statistics shape must match the row width.")
+    # The departing row was validated when it entered the window, so only the
+    # arriving row is checked. Both statistics updates happen after the check.
+    status = _validate_streaming_row(new_row, new_target, p)
+    if status != _VALID_OK:
+        _raise_streaming_validation(status)
     with nogil:
         _stats_slide_fused(
             xtx,
@@ -296,6 +427,7 @@ def rolling_update(
     cdef double[::1] old_direction
     cdef double[::1] new_direction
     cdef bint valid = True
+    cdef int status
 
     if p > NATIVE_STACK_MAX_PARAMS:
         raise ValueError("native stack kernel supports at most 256 parameters.")
@@ -307,6 +439,12 @@ def rolling_update(
         raise ValueError("inverse shape must match the row width.")
     if xty.shape[0] != p or beta.shape[0] != p:
         raise ValueError("vector state shape must match the row width.")
+    # The departing row was validated when it entered the window. Checking the
+    # arriving row here, before any mutation, keeps a rejected push from leaving
+    # partially updated statistics behind.
+    status = _validate_streaming_row(new_row, new_target, p)
+    if status != _VALID_OK:
+        _raise_streaming_validation(status)
 
     old_direction = <double[:p]>&old_direction_storage[0]
     new_direction = <double[:p]>&new_direction_storage[0]
